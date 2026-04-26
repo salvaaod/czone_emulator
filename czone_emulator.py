@@ -21,6 +21,7 @@ PGN_65283 = 65283
 PGN_65284 = 65284
 PGN_65290 = 65290
 PGN_127501 = 127501
+PGN_127502 = 127502
 
 CZONE_MESSAGE = 0x9927
 CZONE_DIP_SWITCH = 200
@@ -153,6 +154,7 @@ class CZone:
     state2: int = 0
     authenticated: bool = False
     on_switch_event: Optional[Callable[[int, str], None]] = None
+    on_network_event: Optional[Callable[[int, bytes], None]] = None
 
     def send(self, pgn, data):
         self.dev.send(n2k_id(7, pgn, SRC), data)
@@ -232,6 +234,9 @@ class CZone:
             data = bytes(f.Data[:f.DataLen])
             pgn = parse_pgn(f.ID)
 
+            if pgn in (PGN_127501, PGN_127502) and self.on_network_event:
+                self.on_network_event(pgn, data)
+
             if pgn == PGN_65280:
                 self.handle_command(data)
 
@@ -262,6 +267,7 @@ class CZoneGui:
         self.status_label.pack(pady=(0, 10))
 
         self.czone.on_switch_event = self.record_switch_event
+        self.czone.on_network_event = self.record_network_event
         self.last_periodic = time.time()
 
     def append_log(self, message: str):
@@ -274,6 +280,10 @@ class CZoneGui:
 
     def record_switch_event(self, switch_id: int, state_text: str):
         self.append_log(f"Switch {switch_id} -> {state_text}")
+
+    def record_network_event(self, pgn: int, data: bytes):
+        payload = " ".join(f"{byte:02X}" for byte in data)
+        self.append_log(f"PGN {pgn} RX -> {payload}")
 
     def poll_can(self):
         self.czone.process_rx()
