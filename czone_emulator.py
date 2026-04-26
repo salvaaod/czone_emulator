@@ -1,7 +1,9 @@
 import ctypes
 import os
 import time
+import tkinter as tk
 from dataclasses import dataclass
+from typing import Callable, Optional
 
 # ---------------- CONFIG ----------------
 
@@ -150,6 +152,7 @@ class CZone:
     state1: int = 0
     state2: int = 0
     authenticated: bool = False
+    on_switch_event: Optional[Callable[[int, str], None]] = None
 
     def send(self, pgn, data):
         self.dev.send(n2k_id(7, pgn, SRC), data)
@@ -209,7 +212,11 @@ class CZone:
             elif cmd == 0xF2:
                 self.state2 &= ~(1 << (idx - 4))
 
-        print(f"Switch {sw} -> {'ON' if cmd == 0xF1 else 'OFF'}")
+        state_text = "ON" if cmd == 0xF1 else "OFF"
+        message = f"Switch {sw} -> {state_text}"
+        print(message)
+        if self.on_switch_event:
+            self.on_switch_event(sw, state_text)
 
         self.status()
         self.ack(BANK1 if sw <= 0x08 else BANK2)
@@ -236,6 +243,54 @@ class CZone:
         self.heartbeat(BANK2)
         self.status()
 
+
+class CZoneGui:
+    def __init__(self, czone: CZone):
+        self.czone = czone
+        self.root = tk.Tk()
+        self.root.title("CZone Emulator")
+        self.root.geometry("520x320")
+
+        tk.Label(self.root, text="Received Binary Switch Commands", font=("Arial", 12, "bold")).pack(
+            pady=(10, 4)
+        )
+
+        self.log = tk.Text(self.root, wrap="word", height=14, width=64, state="disabled")
+        self.log.pack(padx=10, pady=6, fill="both", expand=True)
+
+        self.status_label = tk.Label(self.root, text="Waiting for CAN messages...")
+        self.status_label.pack(pady=(0, 10))
+
+        self.czone.on_switch_event = self.record_switch_event
+        self.last_periodic = time.time()
+
+    def append_log(self, message: str):
+        timestamp = time.strftime("%H:%M:%S")
+        line = f"[{timestamp}] {message}"
+        self.log.configure(state="normal")
+        self.log.insert(tk.END, line + "\n")
+        self.log.see(tk.END)
+        self.log.configure(state="disabled")
+
+    def record_switch_event(self, switch_id: int, state_text: str):
+        self.append_log(f"Switch {switch_id} -> {state_text}")
+
+    def poll_can(self):
+        self.czone.process_rx()
+
+        if time.time() - self.last_periodic > 2:
+            self.last_periodic = time.time()
+            self.czone.periodic()
+            self.status_label.configure(text="Heartbeat/status sent")
+
+        self.root.after(50, self.poll_can)
+
+    def run(self):
+        print("CZone emulator GUI running...")
+        self.append_log("CZone emulator GUI running...")
+        self.poll_can()
+        self.root.mainloop()
+
 # ---------------- MAIN ----------------
 
 def main():
@@ -245,17 +300,8 @@ def main():
     dev.open()
 
     czone = CZone(dev)
-
-    last = time.time()
-
-    print("CZone emulator running...")
-
-    while True:
-        czone.process_rx()
-
-        if time.time() - last > 2:
-            last = time.time()
-            czone.periodic()
+    gui = CZoneGui(czone)
+    gui.run()
 
 
 if __name__ == "__main__":
