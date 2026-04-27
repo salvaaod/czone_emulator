@@ -24,7 +24,7 @@ PGN_127501 = 127501
 PGN_127502 = 127502
 
 CZONE_MESSAGE = 0x9927
-CZONE_DIP_SWITCH = 200
+CZONE_DIP_SWITCH_DEFAULT = 1
 
 BANK1 = 0x1D
 BANK2 = 0x1B
@@ -167,6 +167,7 @@ class CZone:
     on_log_event: Optional[Callable[[str], None]] = None
     mfd_sync_state1: int = 0
     mfd_sync_state2: int = 0
+    dip_switch: int = CZONE_DIP_SWITCH_DEFAULT
 
     def send(self, pgn, data):
         self.dev.send(n2k_id(7, pgn, SRC), data)
@@ -240,9 +241,9 @@ class CZone:
             self._log("RX 65280 ignored: signature is not CZone message")
             return
 
-        if data[5] != CZONE_DIP_SWITCH:
+        if data[5] != self.dip_switch:
             self._log(
-                f"RX 65280 ignored: DIP mismatch, got {data[5]}, expected {CZONE_DIP_SWITCH}"
+                f"RX 65280 ignored: DIP mismatch, got {data[5]}, expected {self.dip_switch}"
             )
             return
 
@@ -275,9 +276,9 @@ class CZone:
         if int.from_bytes(data[:2], "little") != CZONE_MESSAGE:
             self._log("RX 65290 ignored: signature is not CZone message")
             return
-        if data[7] != CZONE_DIP_SWITCH:
+        if data[7] != self.dip_switch:
             self._log(
-                f"RX 65290 ignored: DIP mismatch, got {data[7]}, expected {CZONE_DIP_SWITCH}"
+                f"RX 65290 ignored: DIP mismatch, got {data[7]}, expected {self.dip_switch}"
             )
             return
         self._log("CZone authenticated")
@@ -314,6 +315,14 @@ class CZoneGui:
         tk.Label(self.root, text="Received CZone Switch Commands", font=("Arial", 12, "bold")).pack(
             pady=(10, 4)
         )
+        dip_frame = tk.Frame(self.root)
+        dip_frame.pack(pady=(0, 6))
+        tk.Label(dip_frame, text="CZone DIP:").pack(side="left")
+        self.dip_var = tk.StringVar(value=str(self.czone.dip_switch))
+        self.dip_entry = tk.Entry(dip_frame, textvariable=self.dip_var, width=6)
+        self.dip_entry.pack(side="left", padx=(6, 6))
+        self.dip_entry.bind("<Return>", lambda _: self.apply_dip())
+        tk.Button(dip_frame, text="Apply", command=self.apply_dip).pack(side="left")
 
         self.switches_label = tk.Label(self.root, text="Switch states: S1:OFF S2:OFF S3:OFF S4:OFF S5:OFF S6:OFF S7:OFF S8:OFF")
         self.switches_label.pack(pady=(0, 8))
@@ -335,6 +344,23 @@ class CZoneGui:
         self.log.insert(tk.END, line + "\n")
         self.log.see(tk.END)
         self.log.configure(state="disabled")
+
+    def apply_dip(self):
+        raw = self.dip_var.get().strip()
+        try:
+            dip_value = int(raw, 0)
+        except ValueError:
+            self.append_log(f"Invalid DIP value '{raw}'. Keep current {self.czone.dip_switch}.")
+            self.dip_var.set(str(self.czone.dip_switch))
+            return
+
+        if not (0 <= dip_value <= 255):
+            self.append_log(f"Invalid DIP value '{raw}'. Expected 0..255.")
+            self.dip_var.set(str(self.czone.dip_switch))
+            return
+
+        self.czone.dip_switch = dip_value
+        self.append_log(f"CZone DIP updated to {dip_value}.")
 
     def refresh_switch_states(self):
         states = self.czone.get_switch_states()
