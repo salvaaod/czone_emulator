@@ -17,19 +17,21 @@ This repository contains a **Python-based CZone switch emulator** and an **Ardui
 
 1. Opens the CAN device using `ECanVci.dll` at 250 kbps.
 2. Listens for incoming CZone control/configuration PGNs.
-3. Handles switch commands from PGN `65280`.
+3. Handles proprietary CZone switch commands from PGN `65280` as **toggle commands** (switch changes state each valid command).
 4. Handles authentication/config handshaking from PGN `65290`.
 5. Sends periodic updates:
    - heartbeat PGN `65284` (for bank 1 and bank 2)
    - switch-state compatibility PGN `127501`
 6. Sends command acknowledgements on PGN `65283` after switch changes.
+7. Shows live switch state (S1..S8 ON/OFF) in the GUI.
 
 ## Important update: removed PGN 127501/127502 monitoring
 
 The GUI previously displayed incoming network-monitor lines for PGN `127501` and `127502`. This monitoring was not required for the emulator behavior and has been removed.
 
-Current GUI log focus:
-- switch command events (ON/OFF)
+Current GUI/log focus:
+- switch command events (toggle result ON/OFF)
+- live switch-state line (S1..S8)
 - runtime/heartbeat status information
 
 ## Why `CzRaymarineMFDSwitches.ino` is included

@@ -20,6 +20,7 @@ PGN_65280 = 65280
 PGN_65283 = 65283
 PGN_65284 = 65284
 PGN_65290 = 65290
+PGN_127501 = 127501
 
 CZONE_MESSAGE = 0x9927
 CZONE_DIP_SWITCH = 200
@@ -28,6 +29,7 @@ BANK1 = 0x1D
 BANK2 = 0x1B
 
 # ---------------- CAN STRUCTS ----------------
+
 
 class CAN_OBJ(ctypes.Structure):
     _fields_ = [
@@ -42,6 +44,7 @@ class CAN_OBJ(ctypes.Structure):
         ("Reserved", ctypes.c_ubyte * 3),
     ]
 
+
 class INIT_CONFIG(ctypes.Structure):
     _fields_ = [
         ("AccCode", ctypes.c_uint),
@@ -53,7 +56,9 @@ class INIT_CONFIG(ctypes.Structure):
         ("Mode", ctypes.c_ubyte),
     ]
 
+
 # ---------------- GCAN DRIVER ----------------
+
 
 class GCAN:
     def __init__(self, dll_path: str):
@@ -125,13 +130,16 @@ class GCAN:
         count = self.dll.Receive(USBCAN_II, DEVICE_INDEX, CAN_INDEX, buffer, 50, 0)
         return buffer[:count]
 
+
 # ---------------- NMEA2000 HELPERS ----------------
+
 
 def n2k_id(priority, pgn, src, dst=255):
     pf = (pgn >> 8) & 0xFF
     if pf < 240:
         return (priority << 26) | (pgn << 8) | (dst << 8) | src
     return (priority << 26) | (pgn << 8) | src
+
 
 def parse_pgn(can_id):
     pf = (can_id >> 16) & 0xFF
@@ -140,10 +148,13 @@ def parse_pgn(can_id):
         return pf << 8
     return (pf << 8) | ps
 
+
 def u16(v):
     return bytes([v & 0xFF, (v >> 8) & 0xFF])
 
+
 # ---------------- CZONE DEVICE ----------------
+
 
 @dataclass
 class CZone:
@@ -151,10 +162,21 @@ class CZone:
     state1: int = 0
     state2: int = 0
     authenticated: bool = False
-    on_switch_event: Optional[Callable[[int, str], None]] = None
+    on_switch_event: Optional[Callable[[int, bool], None]] = None
 
     def send(self, pgn, data):
         self.dev.send(n2k_id(7, pgn, SRC), data)
+
+    def get_switch_states(self):
+        states = []
+        for switch_id in range(1, 9):
+            if switch_id <= 4:
+                mask = 1 << (switch_id - 1)
+                states.append(bool(self.state1 & mask))
+            else:
+                mask = 1 << (switch_id - 5)
+                states.append(bool(self.state2 & mask))
+        return states
 
     def heartbeat(self, bank):
         if self.authenticated:
@@ -168,6 +190,7 @@ class CZone:
     def status(self):
         status = 0
 
+        # 127501 N2K Binary Status encoding. Matches the .ino mapping style.
         for i in range(4):
             if self.state1 & (1 << i):
                 status |= 1 << (2 * i)
@@ -181,6 +204,16 @@ class CZone:
     def ack(self, bank):
         data = u16(CZONE_MESSAGE) + bytes([bank, 0]) + u16(0) + bytes([0, 0x10])
         self.send(PGN_65283, data)
+
+    def _toggle_switch(self, switch_code: int) -> bool:
+        if switch_code <= 0x08:
+            bit = switch_code - 0x05
+            self.state1 ^= 1 << bit
+            return bool(self.state1 & (1 << bit))
+
+        bit = switch_code - 0x09
+        self.state2 ^= 1 << bit
+        return bool(self.state2 & (1 << bit))
 
     def handle_command(self, data):
         if len(data) < 7:
@@ -198,27 +231,19 @@ class CZone:
         if not (0x05 <= sw <= 0x0C):
             return
 
-        idx = sw - 5
+        if cmd in (0xF1, 0xF2):
+            is_on = self._toggle_switch(sw)
+            state_text = "ON" if is_on else "OFF"
+            message = f"Switch {sw} -> {state_text}"
+            print(message)
+            if self.on_switch_event:
+                self.on_switch_event(sw, is_on)
 
-        if sw <= 0x08:
-            if cmd == 0xF1:
-                self.state1 |= (1 << idx)
-            elif cmd == 0xF2:
-                self.state1 &= ~(1 << idx)
-        else:
-            if cmd == 0xF1:
-                self.state2 |= (1 << (idx - 4))
-            elif cmd == 0xF2:
-                self.state2 &= ~(1 << (idx - 4))
-
-        state_text = "ON" if cmd == 0xF1 else "OFF"
-        message = f"Switch {sw} -> {state_text}"
-        print(message)
-        if self.on_switch_event:
-            self.on_switch_event(sw, state_text)
-
-        self.status()
-        self.ack(BANK1 if sw <= 0x08 else BANK2)
+            self.status()
+            self.ack(BANK1 if sw <= 0x08 else BANK2)
+        elif cmd == 0x40:
+            # End-of-change sync command from MFD.
+            self.ack(BANK1 if sw <= 0x08 else BANK2)
 
     def handle_config(self):
         print("CZone authenticated")
@@ -231,10 +256,8 @@ class CZone:
             data = bytes(f.Data[:f.DataLen])
             pgn = parse_pgn(f.ID)
 
-
             if pgn == PGN_65280:
                 self.handle_command(data)
-
             elif pgn == PGN_65290:
                 self.handle_config()
 
@@ -249,13 +272,16 @@ class CZoneGui:
         self.czone = czone
         self.root = tk.Tk()
         self.root.title("CZone Emulator")
-        self.root.geometry("520x320")
+        self.root.geometry("560x420")
 
-        tk.Label(self.root, text="Received Binary Switch Commands", font=("Arial", 12, "bold")).pack(
+        tk.Label(self.root, text="Received CZone Switch Commands", font=("Arial", 12, "bold")).pack(
             pady=(10, 4)
         )
 
-        self.log = tk.Text(self.root, wrap="word", height=14, width=64, state="disabled")
+        self.switches_label = tk.Label(self.root, text="Switch states: S1:OFF S2:OFF S3:OFF S4:OFF S5:OFF S6:OFF S7:OFF S8:OFF")
+        self.switches_label.pack(pady=(0, 8))
+
+        self.log = tk.Text(self.root, wrap="word", height=16, width=72, state="disabled")
         self.log.pack(padx=10, pady=6, fill="both", expand=True)
 
         self.status_label = tk.Label(self.root, text="Waiting for CAN messages...")
@@ -272,9 +298,16 @@ class CZoneGui:
         self.log.see(tk.END)
         self.log.configure(state="disabled")
 
-    def record_switch_event(self, switch_id: int, state_text: str):
-        self.append_log(f"Switch {switch_id} -> {state_text}")
+    def refresh_switch_states(self):
+        states = self.czone.get_switch_states()
+        display = " ".join(f"S{i + 1}:{'ON' if state else 'OFF'}" for i, state in enumerate(states))
+        self.switches_label.configure(text=f"Switch states: {display}")
 
+    def record_switch_event(self, switch_code: int, is_on: bool):
+        switch_id = (switch_code - 0x05) + 1
+        state_text = "ON" if is_on else "OFF"
+        self.append_log(f"Switch {switch_id} (code 0x{switch_code:02X}) -> {state_text}")
+        self.refresh_switch_states()
 
     def poll_can(self):
         self.czone.process_rx()
@@ -283,16 +316,20 @@ class CZoneGui:
             self.last_periodic = time.time()
             self.czone.periodic()
             self.status_label.configure(text="Heartbeat/status sent")
+            self.refresh_switch_states()
 
         self.root.after(50, self.poll_can)
 
     def run(self):
         print("CZone emulator GUI running...")
         self.append_log("CZone emulator GUI running...")
+        self.refresh_switch_states()
         self.poll_can()
         self.root.mainloop()
 
+
 # ---------------- MAIN ----------------
+
 
 def main():
     runtime_dir = os.path.dirname(os.path.abspath(__file__))
@@ -308,4 +345,3 @@ def main():
 
 if __name__ == "__main__":
     main()
-
