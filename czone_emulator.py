@@ -304,7 +304,8 @@ class CZoneGui:
 # ---------------- MAIN ----------------
 
 def main():
-    dll_path = r"C:\Users\DELL LAPTOP\Desktop\czone_emulator\ECanVci.dll"
+    runtime_dir = os.path.dirname(os.path.abspath(__file__))
+    dll_path = os.path.join(runtime_dir, "ECanVci.dll")
 
     dev = GCAN(dll_path)
     dev.open()
