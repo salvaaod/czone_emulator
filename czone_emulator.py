@@ -20,6 +20,7 @@ PGN_65280 = 65280
 PGN_65283 = 65283
 PGN_65284 = 65284
 PGN_65290 = 65290
+PGN_127501 = 127501
 
 CZONE_MESSAGE = 0x9927
 CZONE_DIP_SWITCH_DEFAULT = 1
@@ -167,6 +168,7 @@ class CZone:
     mfd_sync_state2: int = 0
     dip_switch: int = CZONE_DIP_SWITCH_DEFAULT
     status_reporting_enabled: bool = True
+    status_tx_mode: str = "both"  # one of: "65280", "127501", "both"
 
     def send(self, pgn, data, priority=7):
         self.dev.send(n2k_id(priority, pgn, SRC), data)
@@ -229,10 +231,7 @@ class CZone:
 
         self.send(PGN_65284, data)
 
-    def status(self):
-        if not self.status_reporting_enabled:
-            return
-
+    def _send_status_65280(self):
         # Raymarine/CZone flow uses PGN 65280 command-style frames for output status.
         # Send one frame per output with command byte mirroring the output state:
         # 0xF1 = ON, 0xF2 = OFF.
@@ -257,6 +256,25 @@ class CZone:
                 for idx, state in enumerate(self.get_switch_states())
             )
         )
+
+    def _send_status_127501(self):
+        # Matches the original .ino reference behavior.
+        status = self.mfd_sync_state1 | (self.mfd_sync_state2 << 8)
+        payload = bytes([0]) + status.to_bytes(7, "little")
+        self.send(PGN_127501, payload, priority=3)
+        self._log(
+            f"TX 127501 status report: sync1=0x{self.mfd_sync_state1:02X} "
+            f"sync2=0x{self.mfd_sync_state2:02X}"
+        )
+
+    def status(self):
+        if not self.status_reporting_enabled:
+            return
+
+        if self.status_tx_mode in ("65280", "both"):
+            self._send_status_65280()
+        if self.status_tx_mode in ("127501", "both"):
+            self._send_status_127501()
 
     def ack(self, bank):
         sync_state = self.mfd_sync_state1 if bank == BANK1 else self.mfd_sync_state2
@@ -382,6 +400,16 @@ class CZoneGui:
             variable=self.status_enabled_var,
             command=self.apply_status_reporting,
         ).pack(side="left", padx=(12, 0))
+        tk.Label(dip_frame, text="Status PGN:").pack(side="left", padx=(12, 4))
+        self.status_mode_var = tk.StringVar(value=self.czone.status_tx_mode)
+        tk.OptionMenu(
+            dip_frame,
+            self.status_mode_var,
+            "both",
+            "65280",
+            "127501",
+            command=self.apply_status_mode,
+        ).pack(side="left")
 
         self.switches_label = tk.Label(self.root, text="Switch states: S1:OFF S2:OFF S3:OFF S4:OFF S5:OFF S6:OFF S7:OFF S8:OFF")
         self.switches_label.pack(pady=(0, 8))
@@ -443,6 +471,15 @@ class CZoneGui:
         self.czone.status_reporting_enabled = enabled
         state = "enabled" if enabled else "disabled"
         self.append_log(f"Output status reporting is now {state}.")
+
+    def apply_status_mode(self, selected_mode=None):
+        mode = (selected_mode or self.status_mode_var.get()).strip().lower()
+        if mode not in {"both", "65280", "127501"}:
+            self.append_log(f"Invalid status mode '{mode}'.")
+            self.status_mode_var.set(self.czone.status_tx_mode)
+            return
+        self.czone.status_tx_mode = mode
+        self.append_log(f"Output status transmission mode set to {mode}.")
 
     def refresh_switch_states(self):
         states = self.czone.get_switch_states()

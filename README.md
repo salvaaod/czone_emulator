@@ -21,11 +21,12 @@ This repository contains a **Python-based CZone switch emulator** and an **Ardui
 4. Handles authentication/config handshaking from PGN `65290`.
 5. Sends periodic updates:
    - heartbeat PGN `65284` (for bank 1 and bank 2)
-   - output-status report PGN `65280`
+   - output-status report on selectable PGN mode: `65280`, `127501`, or `both`
 6. Sends command acknowledgements on PGN `65283` after switch changes.
 7. Shows live switch state (S1..S8 ON/OFF) in the GUI.
 8. Lets you enable/disable periodic output-status transmission from the GUI using the **TX Output Status** checkbox.
 9. Provides per-output GUI toggles (**S1..S8**) to force each output ON/OFF individually for bus testing.
+10. Lets you select output-status TX mode from the GUI (**Status PGN**): `both` (recommended), `65280`, or `127501`.
 
 ## Important update: removed PGN 127501/127502 monitoring
 
