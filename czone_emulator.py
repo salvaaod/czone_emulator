@@ -21,6 +21,7 @@ PGN_65283 = 65283
 PGN_65284 = 65284
 PGN_65290 = 65290
 PGN_127501 = 127501
+PGN_127502 = 127502
 
 CZONE_MESSAGE = 0x9927
 CZONE_DIP_SWITCH = 200
@@ -163,9 +164,17 @@ class CZone:
     state2: int = 0
     authenticated: bool = False
     on_switch_event: Optional[Callable[[int, bool], None]] = None
+    on_log_event: Optional[Callable[[str], None]] = None
+    mfd_sync_state1: int = 0
+    mfd_sync_state2: int = 0
 
     def send(self, pgn, data):
         self.dev.send(n2k_id(7, pgn, SRC), data)
+
+    def _log(self, message: str):
+        print(message)
+        if self.on_log_event:
+            self.on_log_event(message)
 
     def get_switch_states(self):
         states = []
@@ -188,65 +197,90 @@ class CZone:
         self.send(PGN_65284, data)
 
     def status(self):
-        status = 0
-
-        # 127501 N2K Binary Status encoding. Matches the .ino mapping style.
-        for i in range(4):
-            if self.state1 & (1 << i):
-                status |= 1 << (2 * i)
-
-            if self.state2 & (1 << i):
-                status |= 1 << (2 * (i + 4))
-
+        # Mirror .ino behaviour: first two bytes carry MFD display sync state.
+        status = self.mfd_sync_state1 | (self.mfd_sync_state2 << 8)
         payload = bytes([0]) + status.to_bytes(7, "little")
         self.send(PGN_127501, payload)
+        self._log(
+            f"TX 127501 status report: sync1=0x{self.mfd_sync_state1:02X} "
+            f"sync2=0x{self.mfd_sync_state2:02X}"
+        )
 
     def ack(self, bank):
-        data = u16(CZONE_MESSAGE) + bytes([bank, 0]) + u16(0) + bytes([0, 0x10])
+        sync_state = self.mfd_sync_state1 if bank == BANK1 else self.mfd_sync_state2
+        data = u16(CZONE_MESSAGE) + bytes([bank, sync_state]) + u16(0) + bytes([0, 0x10])
         self.send(PGN_65283, data)
+        self._log(f"TX 65283 ack: bank=0x{bank:02X} sync=0x{sync_state:02X}")
+
+    @staticmethod
+    def _sync_mask_for_switch_code(switch_code: int) -> int:
+        # Matches .ino: 0x05->0x01, 0x06->0x04, 0x07->0x10, 0x08->0x40.
+        return 1 << (2 * ((switch_code - 0x05) % 4))
 
     def _toggle_switch(self, switch_code: int) -> bool:
         if switch_code <= 0x08:
             bit = switch_code - 0x05
             self.state1 ^= 1 << bit
+            self.mfd_sync_state1 ^= self._sync_mask_for_switch_code(switch_code)
             return bool(self.state1 & (1 << bit))
 
         bit = switch_code - 0x09
         self.state2 ^= 1 << bit
+        self.mfd_sync_state2 ^= self._sync_mask_for_switch_code(switch_code)
         return bool(self.state2 & (1 << bit))
 
     def handle_command(self, data):
+        self._log(f"RX 65280 raw: {data.hex(' ')}")
+
         if len(data) < 7:
+            self._log("RX 65280 ignored: frame shorter than 7 bytes")
             return
 
         if int.from_bytes(data[:2], "little") != CZONE_MESSAGE:
+            self._log("RX 65280 ignored: signature is not CZone message")
             return
 
         if data[5] != CZONE_DIP_SWITCH:
+            self._log(
+                f"RX 65280 ignored: DIP mismatch, got {data[5]}, expected {CZONE_DIP_SWITCH}"
+            )
             return
 
         sw = data[2]
         cmd = data[6]
 
         if not (0x05 <= sw <= 0x0C):
+            self._log(f"RX 65280 ignored: unsupported switch code 0x{sw:02X}")
             return
 
         if cmd in (0xF1, 0xF2):
             is_on = self._toggle_switch(sw)
             state_text = "ON" if is_on else "OFF"
             message = f"Switch {sw} -> {state_text}"
-            print(message)
+            self._log(message)
             if self.on_switch_event:
                 self.on_switch_event(sw, is_on)
 
             self.status()
-            self.ack(BANK1 if sw <= 0x08 else BANK2)
         elif cmd == 0x40:
             # End-of-change sync command from MFD.
             self.ack(BANK1 if sw <= 0x08 else BANK2)
+        else:
+            self._log(f"RX 65280 ignored: unsupported command 0x{cmd:02X}")
 
-    def handle_config(self):
-        print("CZone authenticated")
+    def handle_config(self, data):
+        if len(data) < 8:
+            self._log("RX 65290 ignored: frame shorter than 8 bytes")
+            return
+        if int.from_bytes(data[:2], "little") != CZONE_MESSAGE:
+            self._log("RX 65290 ignored: signature is not CZone message")
+            return
+        if data[7] != CZONE_DIP_SWITCH:
+            self._log(
+                f"RX 65290 ignored: DIP mismatch, got {data[7]}, expected {CZONE_DIP_SWITCH}"
+            )
+            return
+        self._log("CZone authenticated")
         self.authenticated = True
 
     def process_rx(self):
@@ -259,12 +293,15 @@ class CZone:
             if pgn == PGN_65280:
                 self.handle_command(data)
             elif pgn == PGN_65290:
-                self.handle_config()
+                self.handle_config(data)
 
     def periodic(self):
         self.heartbeat(BANK1)
         self.heartbeat(BANK2)
         self.status()
+        if self.authenticated:
+            self.ack(BANK1)
+            self.ack(BANK2)
 
 
 class CZoneGui:
@@ -288,6 +325,7 @@ class CZoneGui:
         self.status_label.pack(pady=(0, 10))
 
         self.czone.on_switch_event = self.record_switch_event
+        self.czone.on_log_event = self.append_log
         self.last_periodic = time.time()
 
     def append_log(self, message: str):
