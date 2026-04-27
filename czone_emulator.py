@@ -166,6 +166,7 @@ class CZone:
     mfd_sync_state1: int = 0
     mfd_sync_state2: int = 0
     dip_switch: int = CZONE_DIP_SWITCH_DEFAULT
+    status_reporting_enabled: bool = True
 
     def send(self, pgn, data, priority=7):
         self.dev.send(n2k_id(priority, pgn, SRC), data)
@@ -196,6 +197,9 @@ class CZone:
         self.send(PGN_65284, data)
 
     def status(self):
+        if not self.status_reporting_enabled:
+            return
+
         # Raymarine/CZone flow uses PGN 65280 command-style frames for output status.
         # Send one frame per output with command byte mirroring the output state:
         # 0xF1 = ON, 0xF2 = OFF.
@@ -338,6 +342,13 @@ class CZoneGui:
         self.dip_entry.pack(side="left", padx=(6, 6))
         self.dip_entry.bind("<Return>", lambda _: self.apply_dip())
         tk.Button(dip_frame, text="Apply", command=self.apply_dip).pack(side="left")
+        self.status_enabled_var = tk.BooleanVar(value=self.czone.status_reporting_enabled)
+        tk.Checkbutton(
+            dip_frame,
+            text="TX Output Status",
+            variable=self.status_enabled_var,
+            command=self.apply_status_reporting,
+        ).pack(side="left", padx=(12, 0))
 
         self.switches_label = tk.Label(self.root, text="Switch states: S1:OFF S2:OFF S3:OFF S4:OFF S5:OFF S6:OFF S7:OFF S8:OFF")
         self.switches_label.pack(pady=(0, 8))
@@ -379,6 +390,12 @@ class CZoneGui:
 
         self.czone.dip_switch = dip_value
         self.append_log(f"CZone DIP updated to {dip_value}.")
+
+    def apply_status_reporting(self):
+        enabled = bool(self.status_enabled_var.get())
+        self.czone.status_reporting_enabled = enabled
+        state = "enabled" if enabled else "disabled"
+        self.append_log(f"Output status reporting is now {state}.")
 
     def refresh_switch_states(self):
         states = self.czone.get_switch_states()

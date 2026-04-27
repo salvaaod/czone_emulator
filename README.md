@@ -24,6 +24,7 @@ This repository contains a **Python-based CZone switch emulator** and an **Ardui
    - output-status report PGN `65280`
 6. Sends command acknowledgements on PGN `65283` after switch changes.
 7. Shows live switch state (S1..S8 ON/OFF) in the GUI.
+8. Lets you enable/disable periodic output-status transmission from the GUI using the **TX Output Status** checkbox.
 
 ## Important update: removed PGN 127501/127502 monitoring
 
