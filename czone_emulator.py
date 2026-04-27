@@ -23,7 +23,7 @@ PGN_65290 = 65290
 PGN_127501 = 127501
 
 CZONE_MESSAGE = 0x9927
-CZONE_DIP_SWITCH = 200
+CZONE_DIP_SWITCH_DEFAULT = 1
 
 BANK1 = 0x1D
 BANK2 = 0x1B
@@ -163,9 +163,18 @@ class CZone:
     state2: int = 0
     authenticated: bool = False
     on_switch_event: Optional[Callable[[int, bool], None]] = None
+    on_log_event: Optional[Callable[[str], None]] = None
+    mfd_sync_state1: int = 0
+    mfd_sync_state2: int = 0
+    dip_switch: int = CZONE_DIP_SWITCH_DEFAULT
 
-    def send(self, pgn, data):
-        self.dev.send(n2k_id(7, pgn, SRC), data)
+    def send(self, pgn, data, priority=7):
+        self.dev.send(n2k_id(priority, pgn, SRC), data)
+
+    def _log(self, message: str):
+        print(message)
+        if self.on_log_event:
+            self.on_log_event(message)
 
     def get_switch_states(self):
         states = []
@@ -188,65 +197,92 @@ class CZone:
         self.send(PGN_65284, data)
 
     def status(self):
-        status = 0
-
-        # 127501 N2K Binary Status encoding. Matches the .ino mapping style.
-        for i in range(4):
-            if self.state1 & (1 << i):
-                status |= 1 << (2 * i)
-
-            if self.state2 & (1 << i):
-                status |= 1 << (2 * (i + 4))
-
+        # Mirror .ino behaviour: first two bytes carry MFD display sync state.
+        status = self.mfd_sync_state1 | (self.mfd_sync_state2 << 8)
         payload = bytes([0]) + status.to_bytes(7, "little")
-        self.send(PGN_127501, payload)
+        # 127501 is standard N2K switching status and should use prio 3.
+        self.send(PGN_127501, payload, priority=3)
+        self._log(
+            f"TX 127501 status report: sync1=0x{self.mfd_sync_state1:02X} "
+            f"sync2=0x{self.mfd_sync_state2:02X}"
+        )
 
     def ack(self, bank):
-        data = u16(CZONE_MESSAGE) + bytes([bank, 0]) + u16(0) + bytes([0, 0x10])
+        sync_state = self.mfd_sync_state1 if bank == BANK1 else self.mfd_sync_state2
+        data = u16(CZONE_MESSAGE) + bytes([bank, sync_state]) + u16(0) + bytes([0, 0x10])
         self.send(PGN_65283, data)
+        self._log(f"TX 65283 ack: bank=0x{bank:02X} sync=0x{sync_state:02X}")
+
+    @staticmethod
+    def _sync_mask_for_switch_code(switch_code: int) -> int:
+        # Matches .ino: 0x05->0x01, 0x06->0x04, 0x07->0x10, 0x08->0x40.
+        return 1 << (2 * ((switch_code - 0x05) % 4))
 
     def _toggle_switch(self, switch_code: int) -> bool:
         if switch_code <= 0x08:
             bit = switch_code - 0x05
             self.state1 ^= 1 << bit
+            self.mfd_sync_state1 ^= self._sync_mask_for_switch_code(switch_code)
             return bool(self.state1 & (1 << bit))
 
         bit = switch_code - 0x09
         self.state2 ^= 1 << bit
+        self.mfd_sync_state2 ^= self._sync_mask_for_switch_code(switch_code)
         return bool(self.state2 & (1 << bit))
 
     def handle_command(self, data):
+        self._log(f"RX 65280 raw: {data.hex(' ')}")
+
         if len(data) < 7:
+            self._log("RX 65280 ignored: frame shorter than 7 bytes")
             return
 
         if int.from_bytes(data[:2], "little") != CZONE_MESSAGE:
+            self._log("RX 65280 ignored: signature is not CZone message")
             return
 
-        if data[5] != CZONE_DIP_SWITCH:
+        if data[5] != self.dip_switch:
+            self._log(
+                f"RX 65280 ignored: DIP mismatch, got {data[5]}, expected {self.dip_switch}"
+            )
             return
 
         sw = data[2]
         cmd = data[6]
 
         if not (0x05 <= sw <= 0x0C):
+            self._log(f"RX 65280 ignored: unsupported switch code 0x{sw:02X}")
             return
 
         if cmd in (0xF1, 0xF2):
             is_on = self._toggle_switch(sw)
             state_text = "ON" if is_on else "OFF"
-            message = f"Switch {sw} -> {state_text}"
-            print(message)
+            switch_id = (sw - 0x05) + 1
+            message = f"Switch {switch_id} -> {state_text}"
+            self._log(message)
             if self.on_switch_event:
                 self.on_switch_event(sw, is_on)
 
             self.status()
-            self.ack(BANK1 if sw <= 0x08 else BANK2)
-        elif cmd == 0x40:
+        elif cmd in (0x40, 0x42):
             # End-of-change sync command from MFD.
             self.ack(BANK1 if sw <= 0x08 else BANK2)
+        else:
+            self._log(f"RX 65280 ignored: unsupported command 0x{cmd:02X}")
 
-    def handle_config(self):
-        print("CZone authenticated")
+    def handle_config(self, data):
+        if len(data) < 8:
+            self._log("RX 65290 ignored: frame shorter than 8 bytes")
+            return
+        if int.from_bytes(data[:2], "little") != CZONE_MESSAGE:
+            self._log("RX 65290 ignored: signature is not CZone message")
+            return
+        if data[7] != self.dip_switch:
+            self._log(
+                f"RX 65290 ignored: DIP mismatch, got {data[7]}, expected {self.dip_switch}"
+            )
+            return
+        self._log("CZone authenticated")
         self.authenticated = True
 
     def process_rx(self):
@@ -259,12 +295,15 @@ class CZone:
             if pgn == PGN_65280:
                 self.handle_command(data)
             elif pgn == PGN_65290:
-                self.handle_config()
+                self.handle_config(data)
 
     def periodic(self):
         self.heartbeat(BANK1)
         self.heartbeat(BANK2)
         self.status()
+        if self.authenticated:
+            self.ack(BANK1)
+            self.ack(BANK2)
 
 
 class CZoneGui:
@@ -277,6 +316,14 @@ class CZoneGui:
         tk.Label(self.root, text="Received CZone Switch Commands", font=("Arial", 12, "bold")).pack(
             pady=(10, 4)
         )
+        dip_frame = tk.Frame(self.root)
+        dip_frame.pack(pady=(0, 6))
+        tk.Label(dip_frame, text="CZone DIP:").pack(side="left")
+        self.dip_var = tk.StringVar(value=str(self.czone.dip_switch))
+        self.dip_entry = tk.Entry(dip_frame, textvariable=self.dip_var, width=6)
+        self.dip_entry.pack(side="left", padx=(6, 6))
+        self.dip_entry.bind("<Return>", lambda _: self.apply_dip())
+        tk.Button(dip_frame, text="Apply", command=self.apply_dip).pack(side="left")
 
         self.switches_label = tk.Label(self.root, text="Switch states: S1:OFF S2:OFF S3:OFF S4:OFF S5:OFF S6:OFF S7:OFF S8:OFF")
         self.switches_label.pack(pady=(0, 8))
@@ -288,7 +335,11 @@ class CZoneGui:
         self.status_label.pack(pady=(0, 10))
 
         self.czone.on_switch_event = self.record_switch_event
-        self.last_periodic = time.time()
+        self.czone.on_log_event = self.append_log
+        now = time.time()
+        self.last_heartbeat = now
+        self.last_ack = now
+        self.last_status = now
 
     def append_log(self, message: str):
         timestamp = time.strftime("%H:%M:%S")
@@ -297,6 +348,23 @@ class CZoneGui:
         self.log.insert(tk.END, line + "\n")
         self.log.see(tk.END)
         self.log.configure(state="disabled")
+
+    def apply_dip(self):
+        raw = self.dip_var.get().strip()
+        try:
+            dip_value = int(raw, 0)
+        except ValueError:
+            self.append_log(f"Invalid DIP value '{raw}'. Keep current {self.czone.dip_switch}.")
+            self.dip_var.set(str(self.czone.dip_switch))
+            return
+
+        if not (0 <= dip_value <= 255):
+            self.append_log(f"Invalid DIP value '{raw}'. Expected 0..255.")
+            self.dip_var.set(str(self.czone.dip_switch))
+            return
+
+        self.czone.dip_switch = dip_value
+        self.append_log(f"CZone DIP updated to {dip_value}.")
 
     def refresh_switch_states(self):
         states = self.czone.get_switch_states()
@@ -311,12 +379,24 @@ class CZoneGui:
 
     def poll_can(self):
         self.czone.process_rx()
+        now = time.time()
 
-        if time.time() - self.last_periodic > 2:
-            self.last_periodic = time.time()
-            self.czone.periodic()
-            self.status_label.configure(text="Heartbeat/status sent")
-            self.refresh_switch_states()
+        if now - self.last_heartbeat > 2:
+            self.last_heartbeat = now
+            self.czone.heartbeat(BANK1)
+            self.czone.heartbeat(BANK2)
+            self.status_label.configure(text="Heartbeat sent")
+
+        if self.czone.authenticated and now - self.last_ack > 0.5:
+            self.last_ack = now
+            self.czone.ack(BANK1)
+            self.czone.ack(BANK2)
+
+        if now - self.last_status > 10:
+            self.last_status = now
+            self.czone.status()
+
+        self.refresh_switch_states()
 
         self.root.after(50, self.poll_can)
 
