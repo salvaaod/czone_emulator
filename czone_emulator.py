@@ -207,6 +207,22 @@ class CZone:
             f"sync2=0x{self.mfd_sync_state2:02X}"
         )
 
+    def change_request(self, switch_code: int, is_on: bool):
+        # Mirrors .ino SetCZoneSwitchChangeRequest127502 / SetN2kPGN127502.
+        # 127502 payload is an UInt64 where low byte is bank instance (0 here),
+        # and each switch status uses 2 bits in N2kBinaryStatus encoding.
+        switch_index = (switch_code - 0x05) + 1
+        bank_status = 0
+        if is_on:
+            bank_status = 1 << (2 * (switch_index - 1))
+        payload_u64 = (bank_status << 8) | 0x00
+        payload = payload_u64.to_bytes(8, "little")
+        self.send(PGN_127502, payload)
+        self._log(
+            f"TX 127502 change request: switch_index={switch_index} "
+            f"is_on={int(is_on)} payload=0x{payload_u64:016X}"
+        )
+
     def ack(self, bank):
         sync_state = self.mfd_sync_state1 if bank == BANK1 else self.mfd_sync_state2
         data = u16(CZONE_MESSAGE) + bytes([bank, sync_state]) + u16(0) + bytes([0, 0x10])
@@ -257,13 +273,15 @@ class CZone:
         if cmd in (0xF1, 0xF2):
             is_on = self._toggle_switch(sw)
             state_text = "ON" if is_on else "OFF"
-            message = f"Switch {sw} -> {state_text}"
+            switch_id = (sw - 0x05) + 1
+            message = f"Switch {switch_id} -> {state_text}"
             self._log(message)
             if self.on_switch_event:
                 self.on_switch_event(sw, is_on)
 
             self.status()
-        elif cmd == 0x40:
+            self.change_request(sw, is_on)
+        elif cmd in (0x40, 0x42):
             # End-of-change sync command from MFD.
             self.ack(BANK1 if sw <= 0x08 else BANK2)
         else:
