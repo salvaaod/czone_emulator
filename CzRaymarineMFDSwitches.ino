@@ -1,5 +1,10 @@
 /*
     Author:     Paul
+
+    NOTE:
+    This sketch is sample/reference code imported from a different project.
+    It is kept in this repository as protocol guidance for a future
+    Arduino-based CZone switch device implementation.
 */
 
 #ifdef _DEBUG 
