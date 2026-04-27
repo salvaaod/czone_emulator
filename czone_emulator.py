@@ -187,6 +187,39 @@ class CZone:
                 states.append(bool(self.state2 & mask))
         return states
 
+    def set_switch_output(self, switch_id: int, is_on: bool, emit_status: bool = True):
+        if not (1 <= switch_id <= 8):
+            raise ValueError(f"switch_id must be in range 1..8, got {switch_id}")
+
+        if switch_id <= 4:
+            bit = 1 << (switch_id - 1)
+            switch_code = 0x04 + switch_id
+            sync_mask = self._sync_mask_for_switch_code(switch_code)
+            if is_on:
+                self.state1 |= bit
+                self.mfd_sync_state1 |= sync_mask
+            else:
+                self.state1 &= ~bit
+                self.mfd_sync_state1 &= ~sync_mask
+        else:
+            bit = 1 << (switch_id - 5)
+            switch_code = 0x04 + switch_id
+            sync_mask = self._sync_mask_for_switch_code(switch_code)
+            if is_on:
+                self.state2 |= bit
+                self.mfd_sync_state2 |= sync_mask
+            else:
+                self.state2 &= ~bit
+                self.mfd_sync_state2 &= ~sync_mask
+
+        state_text = "ON" if is_on else "OFF"
+        self._log(f"Switch {switch_id} forced -> {state_text}")
+        if self.on_switch_event:
+            self.on_switch_event(switch_code, is_on)
+
+        if emit_status:
+            self.status()
+
     def heartbeat(self, bank):
         if self.authenticated:
             state = self.state1 if bank == BANK1 else self.state2
@@ -352,6 +385,20 @@ class CZoneGui:
 
         self.switches_label = tk.Label(self.root, text="Switch states: S1:OFF S2:OFF S3:OFF S4:OFF S5:OFF S6:OFF S7:OFF S8:OFF")
         self.switches_label.pack(pady=(0, 8))
+        manual_frame = tk.Frame(self.root)
+        manual_frame.pack(pady=(0, 8))
+        tk.Label(manual_frame, text="Manual outputs:").pack(side="left")
+        self.output_vars = []
+        self._updating_output_controls = False
+        for switch_id in range(1, 9):
+            var = tk.BooleanVar(value=False)
+            self.output_vars.append(var)
+            tk.Checkbutton(
+                manual_frame,
+                text=f"S{switch_id}",
+                variable=var,
+                command=lambda i=switch_id: self.apply_manual_output(i),
+            ).pack(side="left")
 
         self.log = tk.Text(self.root, wrap="word", height=16, width=72, state="disabled")
         self.log.pack(padx=10, pady=6, fill="both", expand=True)
@@ -401,12 +448,24 @@ class CZoneGui:
         states = self.czone.get_switch_states()
         display = " ".join(f"S{i + 1}:{'ON' if state else 'OFF'}" for i, state in enumerate(states))
         self.switches_label.configure(text=f"Switch states: {display}")
+        self._updating_output_controls = True
+        try:
+            for i, state in enumerate(states):
+                self.output_vars[i].set(state)
+        finally:
+            self._updating_output_controls = False
 
     def record_switch_event(self, switch_code: int, is_on: bool):
         switch_id = (switch_code - 0x05) + 1
         state_text = "ON" if is_on else "OFF"
         self.append_log(f"Switch {switch_id} (code 0x{switch_code:02X}) -> {state_text}")
         self.refresh_switch_states()
+
+    def apply_manual_output(self, switch_id: int):
+        if self._updating_output_controls:
+            return
+        is_on = bool(self.output_vars[switch_id - 1].get())
+        self.czone.set_switch_output(switch_id, is_on)
 
     def poll_can(self):
         self.czone.process_rx()
