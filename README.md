@@ -21,7 +21,7 @@ This repository contains a **Python-based CZone switch emulator** and an **Ardui
 4. Handles authentication/config handshaking from PGN `65290`.
 5. Sends periodic updates:
    - heartbeat PGN `65284` (for bank 1 and bank 2)
-   - switch-state compatibility PGN `127501`
+   - output-status report PGN `65280`
 6. Sends command acknowledgements on PGN `65283` after switch changes.
 7. Shows live switch state (S1..S8 ON/OFF) in the GUI.
 

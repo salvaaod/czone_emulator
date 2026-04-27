@@ -20,7 +20,6 @@ PGN_65280 = 65280
 PGN_65283 = 65283
 PGN_65284 = 65284
 PGN_65290 = 65290
-PGN_127501 = 127501
 
 CZONE_MESSAGE = 0x9927
 CZONE_DIP_SWITCH_DEFAULT = 1
@@ -197,14 +196,29 @@ class CZone:
         self.send(PGN_65284, data)
 
     def status(self):
-        # Mirror .ino behaviour: first two bytes carry MFD display sync state.
-        status = self.mfd_sync_state1 | (self.mfd_sync_state2 << 8)
-        payload = bytes([0]) + status.to_bytes(7, "little")
-        # 127501 is standard N2K switching status and should use prio 3.
-        self.send(PGN_127501, payload, priority=3)
+        # Raymarine/CZone flow uses PGN 65280 command-style frames for output status.
+        # Send one frame per output with command byte mirroring the output state:
+        # 0xF1 = ON, 0xF2 = OFF.
+        for switch_id in range(1, 9):
+            if switch_id <= 4:
+                is_on = bool(self.state1 & (1 << (switch_id - 1)))
+            else:
+                is_on = bool(self.state2 & (1 << (switch_id - 5)))
+
+            switch_code = 0x04 + switch_id  # S1..S8 => 0x05..0x0C
+            cmd = 0xF1 if is_on else 0xF2
+            payload = (
+                u16(CZONE_MESSAGE)
+                + bytes([switch_code, 0x00, 0x00, self.dip_switch, cmd, 0x00])
+            )
+            self.send(PGN_65280, payload)
+
         self._log(
-            f"TX 127501 status report: sync1=0x{self.mfd_sync_state1:02X} "
-            f"sync2=0x{self.mfd_sync_state2:02X}"
+            "TX 65280 status report: "
+            + " ".join(
+                f"S{idx + 1}:{'ON' if state else 'OFF'}"
+                for idx, state in enumerate(self.get_switch_states())
+            )
         )
 
     def ack(self, bank):
