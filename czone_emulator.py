@@ -336,7 +336,10 @@ class CZoneGui:
 
         self.czone.on_switch_event = self.record_switch_event
         self.czone.on_log_event = self.append_log
-        self.last_periodic = time.time()
+        now = time.time()
+        self.last_heartbeat = now
+        self.last_ack = now
+        self.last_status = now
 
     def append_log(self, message: str):
         timestamp = time.strftime("%H:%M:%S")
@@ -376,12 +379,24 @@ class CZoneGui:
 
     def poll_can(self):
         self.czone.process_rx()
+        now = time.time()
 
-        if time.time() - self.last_periodic > 2:
-            self.last_periodic = time.time()
-            self.czone.periodic()
-            self.status_label.configure(text="Heartbeat/status sent")
-            self.refresh_switch_states()
+        if now - self.last_heartbeat > 2:
+            self.last_heartbeat = now
+            self.czone.heartbeat(BANK1)
+            self.czone.heartbeat(BANK2)
+            self.status_label.configure(text="Heartbeat sent")
+
+        if self.czone.authenticated and now - self.last_ack > 0.5:
+            self.last_ack = now
+            self.czone.ack(BANK1)
+            self.czone.ack(BANK2)
+
+        if now - self.last_status > 10:
+            self.last_status = now
+            self.czone.status()
+
+        self.refresh_switch_states()
 
         self.root.after(50, self.poll_can)
 
