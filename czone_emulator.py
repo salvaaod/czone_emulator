@@ -21,7 +21,6 @@ PGN_65283 = 65283
 PGN_65284 = 65284
 PGN_65290 = 65290
 PGN_127501 = 127501
-PGN_127502 = 127502
 
 CZONE_MESSAGE = 0x9927
 CZONE_DIP_SWITCH_DEFAULT = 1
@@ -169,8 +168,8 @@ class CZone:
     mfd_sync_state2: int = 0
     dip_switch: int = CZONE_DIP_SWITCH_DEFAULT
 
-    def send(self, pgn, data):
-        self.dev.send(n2k_id(7, pgn, SRC), data)
+    def send(self, pgn, data, priority=7):
+        self.dev.send(n2k_id(priority, pgn, SRC), data)
 
     def _log(self, message: str):
         print(message)
@@ -201,26 +200,11 @@ class CZone:
         # Mirror .ino behaviour: first two bytes carry MFD display sync state.
         status = self.mfd_sync_state1 | (self.mfd_sync_state2 << 8)
         payload = bytes([0]) + status.to_bytes(7, "little")
-        self.send(PGN_127501, payload)
+        # 127501 is standard N2K switching status and should use prio 3.
+        self.send(PGN_127501, payload, priority=3)
         self._log(
             f"TX 127501 status report: sync1=0x{self.mfd_sync_state1:02X} "
             f"sync2=0x{self.mfd_sync_state2:02X}"
-        )
-
-    def change_request(self, switch_code: int, is_on: bool):
-        # Mirrors .ino SetCZoneSwitchChangeRequest127502 / SetN2kPGN127502.
-        # 127502 payload is an UInt64 where low byte is bank instance (0 here),
-        # and each switch status uses 2 bits in N2kBinaryStatus encoding.
-        switch_index = (switch_code - 0x05) + 1
-        bank_status = 0
-        if is_on:
-            bank_status = 1 << (2 * (switch_index - 1))
-        payload_u64 = (bank_status << 8) | 0x00
-        payload = payload_u64.to_bytes(8, "little")
-        self.send(PGN_127502, payload)
-        self._log(
-            f"TX 127502 change request: switch_index={switch_index} "
-            f"is_on={int(is_on)} payload=0x{payload_u64:016X}"
         )
 
     def ack(self, bank):
@@ -280,7 +264,6 @@ class CZone:
                 self.on_switch_event(sw, is_on)
 
             self.status()
-            self.change_request(sw, is_on)
         elif cmd in (0x40, 0x42):
             # End-of-change sync command from MFD.
             self.ack(BANK1 if sw <= 0x08 else BANK2)
