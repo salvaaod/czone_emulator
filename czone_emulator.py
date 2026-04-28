@@ -2,7 +2,7 @@ import ctypes
 import os
 import time
 import tkinter as tk
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Callable, Optional
 
 # ---------------- CONFIG ----------------
@@ -16,10 +16,14 @@ TIMING1_250K = 0x1C
 
 SRC = 1
 
+PGN_59904 = 59904
+PGN_60928 = 60928
 PGN_65280 = 65280
 PGN_65283 = 65283
 PGN_65284 = 65284
 PGN_65290 = 65290
+PGN_126993 = 126993
+PGN_126996 = 126996
 PGN_127501 = 127501
 
 CZONE_MESSAGE = 0x9927
@@ -27,6 +31,12 @@ CZONE_DIP_SWITCH_DEFAULT = 1
 
 BANK1 = 0x1D
 BANK2 = 0x1B
+
+MANUFACTURER_CODE = 38
+UNIQUE_NUMBER = 260001
+DEVICE_FUNCTION = 30
+DEVICE_CLASS = 140
+INDUSTRY_GROUP_MARINE = 4
 
 # ---------------- CAN STRUCTS ----------------
 
@@ -149,6 +159,17 @@ def parse_pgn(can_id):
     return (pf << 8) | ps
 
 
+def parse_source(can_id):
+    return can_id & 0xFF
+
+
+def parse_destination(can_id):
+    pf = (can_id >> 16) & 0xFF
+    if pf < 240:
+        return (can_id >> 8) & 0xFF
+    return 255
+
+
 def u16(v):
     return bytes([v & 0xFF, (v >> 8) & 0xFF])
 
@@ -167,9 +188,80 @@ class CZone:
     mfd_sync_state1: int = 0
     mfd_sync_state2: int = 0
     dip_switch: int = CZONE_DIP_SWITCH_DEFAULT
+    fast_packet_sequence: int = 0
+    heartbeat_counter: int = 0
+    started_at: float = field(default_factory=time.time)
 
-    def send(self, pgn, data, priority=7):
-        self.dev.send(n2k_id(priority, pgn, SRC), data)
+    def send(self, pgn, data, priority=7, dst=255):
+        self.dev.send(n2k_id(priority, pgn, SRC, dst), data)
+
+    def _send_fast_packet(self, pgn: int, payload: bytes, priority=6):
+        if len(payload) > 223:
+            raise ValueError("NMEA2000 fast-packet payload must be <= 223 bytes")
+
+        sequence_id = self.fast_packet_sequence & 0x07
+        self.fast_packet_sequence = (self.fast_packet_sequence + 1) & 0x07
+
+        index = 0
+        frame_counter = 0
+        first_chunk = payload[:6]
+        index += len(first_chunk)
+        frame = bytes([(sequence_id << 5) | frame_counter, len(payload)]) + first_chunk
+        frame += bytes([0xFF] * (8 - len(frame)))
+        self.send(pgn, frame, priority=priority)
+
+        frame_counter = 1
+        while index < len(payload):
+            chunk = payload[index:index + 7]
+            index += len(chunk)
+            frame = bytes([(sequence_id << 5) | frame_counter]) + chunk
+            frame += bytes([0xFF] * (8 - len(frame)))
+            self.send(pgn, frame, priority=priority)
+            frame_counter += 1
+
+    @staticmethod
+    def _fixed_string_field(text: str, size: int) -> bytes:
+        raw = text.encode("ascii", errors="ignore")[: max(0, size - 1)]
+        padded = raw + b"\x00"
+        return padded + bytes([0xFF] * (size - len(padded)))
+
+    def _build_name(self) -> int:
+        value = 0
+        value |= UNIQUE_NUMBER & ((1 << 21) - 1)
+        value |= (MANUFACTURER_CODE & 0x7FF) << 21
+        value |= (0 & 0x07) << 32  # Device instance
+        value |= (0 & 0x1F) << 35  # Function instance
+        value |= (DEVICE_FUNCTION & 0xFF) << 40
+        value |= (DEVICE_CLASS & 0x7F) << 48
+        value |= (0 & 0x0F) << 55  # System instance
+        value |= (INDUSTRY_GROUP_MARINE & 0x07) << 59
+        value |= 1 << 63  # Arbitrary address capable
+        return value
+
+    def send_iso_address_claim(self):
+        payload = self._build_name().to_bytes(8, "little")
+        self.send(PGN_60928, payload, priority=6, dst=255)
+        self._log("TX 60928 ISO Address Claim")
+
+    def send_product_info(self):
+        payload = (
+            u16(2100)
+            + u16(1)
+            + self._fixed_string_field("Switch Bank", 32)
+            + self._fixed_string_field("1.000 06/04/21", 32)
+            + self._fixed_string_field("1.000", 32)
+            + self._fixed_string_field("00260001", 32)
+            + bytes([1, 1])
+        )
+        self._send_fast_packet(PGN_126996, payload, priority=6)
+        self._log("TX 126996 Product Info")
+
+    def send_n2k_heartbeat(self):
+        uptime_seconds = int(time.time() - self.started_at)
+        payload = bytes([self.heartbeat_counter & 0xFF, 0x00]) + uptime_seconds.to_bytes(4, "little") + bytes([0xFF, 0xFF])
+        self.heartbeat_counter = (self.heartbeat_counter + 1) & 0xFF
+        self.send(PGN_126993, payload, priority=6)
+        self._log("TX 126993 Heartbeat")
 
     def _log(self, message: str):
         print(message)
@@ -285,17 +377,39 @@ class CZone:
         self._log("CZone authenticated")
         self.authenticated = True
 
+    def handle_iso_request(self, data: bytes, src: int, dst: int):
+        if len(data) < 3:
+            self._log("RX 59904 ignored: frame shorter than 3 bytes")
+            return
+
+        if dst not in (SRC, 255):
+            return
+
+        requested_pgn = data[0] | (data[1] << 8) | (data[2] << 16)
+        self._log(f"RX 59904 ISO Request from src={src} for PGN {requested_pgn}")
+
+        if requested_pgn == PGN_60928:
+            self.send_iso_address_claim()
+        elif requested_pgn == PGN_126996:
+            self.send_product_info()
+        elif requested_pgn == PGN_126993:
+            self.send_n2k_heartbeat()
+
     def process_rx(self):
         frames = self.dev.recv()
 
         for f in frames:
             data = bytes(f.Data[:f.DataLen])
             pgn = parse_pgn(f.ID)
+            src = parse_source(f.ID)
+            dst = parse_destination(f.ID)
 
             if pgn == PGN_65280:
                 self.handle_command(data)
             elif pgn == PGN_65290:
                 self.handle_config(data)
+            elif pgn == PGN_59904:
+                self.handle_iso_request(data, src, dst)
 
     def periodic(self):
         self.heartbeat(BANK1)
@@ -340,6 +454,7 @@ class CZoneGui:
         self.last_heartbeat = now
         self.last_ack = now
         self.last_status = now
+        self.last_n2k_heartbeat = now
 
     def append_log(self, message: str):
         timestamp = time.strftime("%H:%M:%S")
@@ -396,6 +511,10 @@ class CZoneGui:
             self.last_status = now
             self.czone.status()
 
+        if now - self.last_n2k_heartbeat > 60:
+            self.last_n2k_heartbeat = now
+            self.czone.send_n2k_heartbeat()
+
         self.refresh_switch_states()
 
         self.root.after(50, self.poll_can)
@@ -403,6 +522,9 @@ class CZoneGui:
     def run(self):
         print("CZone emulator GUI running...")
         self.append_log("CZone emulator GUI running...")
+        self.czone.send_iso_address_claim()
+        self.czone.send_product_info()
+        self.czone.send_n2k_heartbeat()
         self.refresh_switch_states()
         self.poll_can()
         self.root.mainloop()
