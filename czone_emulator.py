@@ -208,7 +208,9 @@ class CZone:
             u16(CZONE_MESSAGE)
             + bytes([BANK1, self.state1, BANK2, self.state2, self.mfd_sync_state1, self.mfd_sync_state2, 0x00])
         )
-        seq = int(time.time() * 1000) & 0x1F
+        # NMEA2000 fast-packet header byte:
+        # upper 3 bits = sequence id (0..7), lower 5 bits = frame index (0..31).
+        seq = int(time.time() * 1000) & 0x07
         first = bytes([(seq << 5) | 0x00, len(payload)]) + payload[:6]
         second = bytes([(seq << 5) | 0x01]) + payload[6:]
         self.send(PGN_130817, first)
