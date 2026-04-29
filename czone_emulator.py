@@ -206,7 +206,6 @@ class CZone:
     state: int = 0
     authenticated: bool = False
     on_switch_event: Optional[Callable[[int, bool], None]] = None
-    on_log_event: Optional[Callable[[str], None]] = None
     dip_switch: int = CZONE_DIP_SWITCH_DEFAULT
     pending_commands: dict[int, int] | None = None
 
@@ -235,8 +234,6 @@ class CZone:
 
     def _log(self, message: str):
         print(message)
-        if self.on_log_event:
-            self.on_log_event(message)
 
     def get_switch_states(self):
         states = []
@@ -394,7 +391,7 @@ class CZoneGui:
         self.czone = czone
         self.root = tk.Tk()
         self.root.title("CZone Emulator")
-        self.root.geometry("560x420")
+        self.root.resizable(False, False)
 
         tk.Label(self.root, text="Received CZone Switch Commands", font=("Arial", 12, "bold")).pack(
             pady=(10, 4)
@@ -408,29 +405,34 @@ class CZoneGui:
         self.dip_entry.bind("<Return>", lambda _: self.apply_dip())
         tk.Button(dip_frame, text="Apply", command=self.apply_dip).pack(side="left")
 
-        self.switches_label = tk.Label(self.root, text="Switch states: S1:OFF S2:OFF S3:OFF S4:OFF")
-        self.switches_label.pack(pady=(0, 8))
+        self.switches_label = tk.Label(self.root, text="Switch states: S1: OFF    S2: OFF    S3: OFF    S4: OFF")
+        self.switches_label.pack(pady=(0, 14))
 
-        self.log = tk.Text(self.root, wrap="word", height=16, width=72, state="disabled")
-        self.log.pack(padx=10, pady=6, fill="both", expand=True)
+        manual_frame = tk.Frame(self.root)
+        manual_frame.pack(pady=(0, 12))
+        tk.Label(manual_frame, text="Manual control:").pack(side="left", padx=(0, 8))
+        self.manual_vars = []
+        for switch_id in range(1, 5):
+            var = tk.BooleanVar(value=False)
+            tk.Checkbutton(
+                manual_frame,
+                text=f"S{switch_id}",
+                variable=var,
+                command=lambda sid=switch_id, v=var: self.set_switch_from_gui(sid, v.get()),
+            ).pack(side="left", padx=(0, 10))
+            self.manual_vars.append(var)
 
         self.status_label = tk.Label(self.root, text="Waiting for CAN messages...")
         self.status_label.pack(pady=(0, 10))
 
         self.czone.on_switch_event = self.record_switch_event
-        self.czone.on_log_event = self.append_log
         now = time.time()
         self.last_heartbeat = now
         self.last_status = now
         self.last_n2k_identity = now - 60
 
     def append_log(self, message: str):
-        timestamp = time.strftime("%H:%M:%S")
-        line = f"[{timestamp}] {message}"
-        self.log.configure(state="normal")
-        self.log.insert(tk.END, line + "\n")
-        self.log.see(tk.END)
-        self.log.configure(state="disabled")
+        print(message)
 
     def apply_dip(self):
         raw = self.dip_var.get().strip()
@@ -451,8 +453,18 @@ class CZoneGui:
 
     def refresh_switch_states(self):
         states = self.czone.get_switch_states()
-        display = " ".join(f"S{i + 1}:{'ON' if state else 'OFF'}" for i, state in enumerate(states))
+        display = "    ".join(f"S{i + 1}: {'ON' if state else 'OFF'}" for i, state in enumerate(states))
         self.switches_label.configure(text=f"Switch states: {display}")
+        for i, state in enumerate(states):
+            self.manual_vars[i].set(state)
+
+    def set_switch_from_gui(self, switch_id: int, is_on: bool):
+        switch_code = 0x04 + switch_id
+        updated = self.czone._set_switch(switch_code, is_on)
+        self.append_log(f"Manual switch {switch_id} -> {'ON' if updated else 'OFF'}")
+        self.czone.heartbeat()
+        self.czone.detailed_status()
+        self.refresh_switch_states()
 
     def record_switch_event(self, switch_code: int, is_on: bool):
         switch_id = (switch_code - 0x05) + 1
@@ -484,7 +496,6 @@ class CZoneGui:
 
     def run(self):
         print("CZone emulator GUI running...")
-        self.append_log("CZone emulator GUI running...")
         self.czone.address_claim()
         self.czone.product_information()
         self.refresh_switch_states()
