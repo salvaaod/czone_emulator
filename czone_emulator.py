@@ -21,7 +21,6 @@ PGN_59904 = 59904
 PGN_65280 = 65280
 PGN_65283 = 65283
 PGN_65284 = 65284
-PGN_65288 = 65288
 PGN_65290 = 65290
 PGN_126996 = 126996
 PGN_130817 = 130817
@@ -236,11 +235,6 @@ class CZone:
     def _log(self, message: str):
         print(message)
 
-    def pgn_65288_status(self):
-        data = u16(CZONE_MESSAGE) + bytes([BANK_ID, 0x11, self.state, 0x00, 0x00, 0x00])
-        self.send(PGN_65288, data)
-        self._log(f"TX 65288 status: bank=0x{BANK_ID:02X} state=0x{self.state:02X}")
-
     def get_switch_states(self):
         states = []
         for switch_id in range(1, 5):
@@ -341,7 +335,6 @@ class CZone:
                 self.on_switch_event(sw, is_on)
             self.heartbeat()
             self.detailed_status()
-            self.pgn_65288_status()
         else:
             self._log(f"RX 65280 ignored: unsupported command 0x{cmd:02X}")
 
@@ -429,9 +422,6 @@ class CZoneGui:
             ).pack(side="left", padx=(0, 10))
             self.manual_vars.append(var)
 
-        self.send_65288_var = tk.BooleanVar(value=True)
-        tk.Checkbutton(self.root, text="Send PGN 65288", variable=self.send_65288_var).pack(pady=(0, 10))
-
         self.status_label = tk.Label(self.root, text="Waiting for CAN messages...")
         self.status_label.pack(pady=(0, 10))
 
@@ -474,8 +464,6 @@ class CZoneGui:
         self.append_log(f"Manual switch {switch_id} -> {'ON' if updated else 'OFF'}")
         self.czone.heartbeat()
         self.czone.detailed_status()
-        if self.send_65288_var.get():
-            self.czone.pgn_65288_status()
         self.refresh_switch_states()
 
     def record_switch_event(self, switch_code: int, is_on: bool):
@@ -501,8 +489,6 @@ class CZoneGui:
         if now - self.last_status > 2:
             self.last_status = now
             self.czone.detailed_status()
-            if self.send_65288_var.get():
-                self.czone.pgn_65288_status()
 
         self.refresh_switch_states()
 
@@ -512,8 +498,6 @@ class CZoneGui:
         print("CZone emulator GUI running...")
         self.czone.address_claim()
         self.czone.product_information()
-        if self.send_65288_var.get():
-            self.czone.pgn_65288_status()
         self.refresh_switch_states()
         self.poll_can()
         self.root.mainloop()
