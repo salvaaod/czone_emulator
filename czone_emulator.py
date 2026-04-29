@@ -14,7 +14,7 @@ CAN_INDEX = 0
 TIMING0_250K = 0x01
 TIMING1_250K = 0x1C
 
-SRC = 0
+SRC = 2
 
 PGN_60928 = 60928
 PGN_59904 = 59904
@@ -46,8 +46,7 @@ N2K_SOFTWARE_ID = "6.26.24.0"
 N2K_HARDWARE_ID = "A"
 N2K_SERIAL_ID = "J4616585-0068"
 
-BANK1 = 0x1D
-BANK2 = 0x1B
+BANK_ID = 0x02
 
 # ---------------- CAN STRUCTS ----------------
 
@@ -204,13 +203,10 @@ def encode_iso_name() -> bytes:
 @dataclass
 class CZone:
     dev: GCAN
-    state1: int = 0
-    state2: int = 0
+    state: int = 0
     authenticated: bool = False
     on_switch_event: Optional[Callable[[int, bool], None]] = None
     on_log_event: Optional[Callable[[str], None]] = None
-    mfd_sync_state1: int = 0
-    mfd_sync_state2: int = 0
     dip_switch: int = CZONE_DIP_SWITCH_DEFAULT
     pending_commands: dict[int, int] | None = None
 
@@ -244,34 +240,28 @@ class CZone:
 
     def get_switch_states(self):
         states = []
-        for switch_id in range(1, 9):
-            if switch_id <= 4:
-                mask = 1 << (switch_id - 1)
-                states.append(bool(self.state1 & mask))
-            else:
-                mask = 1 << (switch_id - 5)
-                states.append(bool(self.state2 & mask))
+        for switch_id in range(1, 5):
+            mask = 1 << (switch_id - 1)
+            states.append(bool(self.state & mask))
         return states
 
-    def heartbeat(self, bank):
+    def heartbeat(self):
         if self.authenticated:
-            state = self.state1 if bank == BANK1 else self.state2
-            data = u16(CZONE_MESSAGE) + bytes([bank, 0x0F, state]) + u16(0) + bytes([0])
+            data = u16(CZONE_MESSAGE) + bytes([BANK_ID, 0x0F, self.state, 0x00, 0x00, 0x00])
         else:
             data = u16(CZONE_MESSAGE) + bytes([0xFF]) + u16(0x0F0F) + u16(0) + bytes([0])
 
         self.send(PGN_65284, data)
 
     def detailed_status(self):
-        # Minimal proprietary 130817 payload with both bank states.
-        payload = (
-            u16(CZONE_MESSAGE)
-            + bytes([BANK1, self.state1, BANK2, self.state2, self.mfd_sync_state1, self.mfd_sync_state2, 0x00])
-        )
+        payload = bytearray(u16(CZONE_MESSAGE) + bytes([0x00, BANK_ID]))
+        for circuit in range(4):
+            state = 0x01 if (self.state & (1 << circuit)) else 0x00
+            payload.extend([state, 0x00, 0x04, 0x00])
+        while len(payload) < 28:
+            payload.append(0xFF)
         self.send_fast_packet(PGN_130817, payload, priority=7)
-        self._log(
-            f"TX 130817 detailed: bank1=0x{self.state1:02X} bank2=0x{self.state2:02X}"
-        )
+        self._log(f"TX 130817 detailed: bank=0x{BANK_ID:02X} state=0x{self.state:02X}")
 
     def address_claim(self):
         self.send(PGN_60928, encode_iso_name(), priority=6)
@@ -290,34 +280,13 @@ class CZone:
         self.send_fast_packet(PGN_126996, payload, priority=6)
         self._log("TX 126996 product information")
 
-    def ack(self, bank):
-        sync_state = self.mfd_sync_state1 if bank == BANK1 else self.mfd_sync_state2
-        data = u16(CZONE_MESSAGE) + bytes([bank, sync_state]) + u16(0) + bytes([0, 0x10])
-        self.send(PGN_65283, data)
-        self._log(f"TX 65283 ack: bank=0x{bank:02X} sync=0x{sync_state:02X}")
-
-    @staticmethod
-    def _sync_mask_for_switch_code(switch_code: int) -> int:
-        # Matches .ino: 0x05->0x01, 0x06->0x04, 0x07->0x10, 0x08->0x40.
-        return 1 << (2 * ((switch_code - 0x05) % 4))
-
     def _set_switch(self, switch_code: int, is_on: bool) -> bool:
-        if switch_code <= 0x08:
-            bit = switch_code - 0x05
-            mask = 1 << bit
-            prev = bool(self.state1 & mask)
-            self.state1 = (self.state1 | mask) if is_on else (self.state1 & ~mask)
-            if prev != is_on:
-                self.mfd_sync_state1 ^= self._sync_mask_for_switch_code(switch_code)
-            return bool(self.state1 & mask)
-
-        bit = switch_code - 0x09
+        if not (0x05 <= switch_code <= 0x08):
+            return False
+        bit = switch_code - 0x05
         mask = 1 << bit
-        prev = bool(self.state2 & mask)
-        self.state2 = (self.state2 | mask) if is_on else (self.state2 & ~mask)
-        if prev != is_on:
-            self.mfd_sync_state2 ^= self._sync_mask_for_switch_code(switch_code)
-        return bool(self.state2 & mask)
+        self.state = (self.state | mask) if is_on else (self.state & ~mask)
+        return bool(self.state & mask)
 
     def handle_command(self, data):
         self._log(f"RX 65280 raw: {data.hex(' ')}")
@@ -345,7 +314,7 @@ class CZone:
         sw = data[2]
         cmd = data[6]
 
-        if not (0x05 <= sw <= 0x0C):
+        if not (0x05 <= sw <= 0x08):
             self._log(f"RX 65280 ignored: unsupported switch code 0x{sw:02X}")
             return
 
@@ -360,16 +329,14 @@ class CZone:
                 is_on = self._set_switch(sw, staged == 0xF1)
                 self.pending_commands.pop(sw, None)
             else:
-                # No staged value for this switch: keep existing state.
-                is_on = bool((self.state1 if sw <= 0x08 else self.state2) & (1 << ((sw - 0x05) % 4)))
+                is_on = bool(self.state & (1 << (sw - 0x05)))
             state_text = "ON" if is_on else "OFF"
             switch_id = (sw - 0x05) + 1
             message = f"Switch {switch_id} -> {state_text}"
             self._log(message)
             if self.on_switch_event:
                 self.on_switch_event(sw, is_on)
-            self.ack(BANK1 if sw <= 0x08 else BANK2)
-            self.heartbeat(BANK1 if sw <= 0x08 else BANK2)
+            self.heartbeat()
             self.detailed_status()
         else:
             self._log(f"RX 65280 ignored: unsupported command 0x{cmd:02X}")
@@ -418,12 +385,8 @@ class CZone:
     def periodic(self):
         self.address_claim()
         self.product_information()
-        self.heartbeat(BANK1)
-        self.heartbeat(BANK2)
+        self.heartbeat()
         self.detailed_status()
-        if self.authenticated:
-            self.ack(BANK1)
-            self.ack(BANK2)
 
 
 class CZoneGui:
@@ -445,7 +408,7 @@ class CZoneGui:
         self.dip_entry.bind("<Return>", lambda _: self.apply_dip())
         tk.Button(dip_frame, text="Apply", command=self.apply_dip).pack(side="left")
 
-        self.switches_label = tk.Label(self.root, text="Switch states: S1:OFF S2:OFF S3:OFF S4:OFF S5:OFF S6:OFF S7:OFF S8:OFF")
+        self.switches_label = tk.Label(self.root, text="Switch states: S1:OFF S2:OFF S3:OFF S4:OFF")
         self.switches_label.pack(pady=(0, 8))
 
         self.log = tk.Text(self.root, wrap="word", height=16, width=72, state="disabled")
@@ -458,7 +421,6 @@ class CZoneGui:
         self.czone.on_log_event = self.append_log
         now = time.time()
         self.last_heartbeat = now
-        self.last_ack = now
         self.last_status = now
         self.last_n2k_identity = now - 60
 
@@ -504,8 +466,7 @@ class CZoneGui:
 
         if now - self.last_heartbeat > 2:
             self.last_heartbeat = now
-            self.czone.heartbeat(BANK1)
-            self.czone.heartbeat(BANK2)
+            self.czone.heartbeat()
             self.status_label.configure(text="Heartbeat sent")
 
         if now - self.last_n2k_identity > 60:
@@ -513,12 +474,7 @@ class CZoneGui:
             self.czone.address_claim()
             self.czone.product_information()
 
-        if self.czone.authenticated and now - self.last_ack > 0.5:
-            self.last_ack = now
-            self.czone.ack(BANK1)
-            self.czone.ack(BANK2)
-
-        if now - self.last_status > 10:
+        if now - self.last_status > 2:
             self.last_status = now
             self.czone.detailed_status()
 
