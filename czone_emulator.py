@@ -40,6 +40,10 @@ N2K_DB_VERSION = 0
 N2K_CERTIFICATION_LEVEL = 0
 N2K_LOAD_EQUIVALENCY = 0
 N2K_MANUFACTURER_PRODUCT_CODE = 0
+N2K_MODEL_ID = ""
+N2K_SOFTWARE_ID = ""
+N2K_HARDWARE_ID = ""
+N2K_SERIAL_ID = ""
 
 BANK1 = 0x1D
 BANK2 = 0x1B
@@ -169,6 +173,11 @@ def u16(v):
     return bytes([v & 0xFF, (v >> 8) & 0xFF])
 
 
+def n2k_string_field(text: str, field_len: int = 32) -> bytes:
+    raw = text.encode("ascii", errors="ignore")[: field_len - 1]
+    return raw + b"\x00" + (b"\xFF" * (field_len - len(raw) - 1))
+
+
 def encode_iso_name() -> bytes:
     value = 0
     value |= N2K_UNIQUE_NUMBER & 0x1FFFFF
@@ -264,24 +273,14 @@ class CZone:
         self._log("TX 60928 ISO address claim")
 
     def product_information(self):
-        model_id = b""
-        software_id = b""
-        hardware_id = b""
-        serial_id = b""
-        cert_field = (N2K_CERTIFICATION_LEVEL & 0x07) << 5 | (N2K_LOAD_EQUIVALENCY & 0x1F)
         payload = (
             u16(N2K_DB_VERSION)
             + u16(N2K_MANUFACTURER_PRODUCT_CODE)
-            + bytes([cert_field])
-            + b"\x00"  # reserved
-            + model_id
-            + b"\x00"
-            + software_id
-            + b"\x00"
-            + hardware_id
-            + b"\x00"
-            + serial_id
-            + b"\x00"
+            + n2k_string_field(N2K_MODEL_ID)
+            + n2k_string_field(N2K_SOFTWARE_ID)
+            + n2k_string_field(N2K_HARDWARE_ID)
+            + n2k_string_field(N2K_SERIAL_ID)
+            + bytes([N2K_CERTIFICATION_LEVEL & 0xFF, N2K_LOAD_EQUIVALENCY & 0xFF])
         )
         self.send_fast_packet(PGN_126996, payload, priority=6)
         self._log("TX 126996 product information")
@@ -327,10 +326,16 @@ class CZone:
             return
 
         if data[5] != self.dip_switch:
-            self._log(
-                f"RX 65280 ignored: DIP mismatch, got {data[5]}, expected {self.dip_switch}"
-            )
-            return
+            if self.authenticated:
+                self._log(
+                    f"RX 65280 DIP auto-adjust: got {data[5]}, expected {self.dip_switch}; switching to received DIP"
+                )
+                self.dip_switch = data[5]
+            else:
+                self._log(
+                    f"RX 65280 ignored: DIP mismatch, got {data[5]}, expected {self.dip_switch}"
+                )
+                return
 
         sw = data[2]
         cmd = data[6]
@@ -373,9 +378,9 @@ class CZone:
             return
         if data[7] != self.dip_switch:
             self._log(
-                f"RX 65290 ignored: DIP mismatch, got {data[7]}, expected {self.dip_switch}"
+                f"RX 65290 DIP auto-adjust: got {data[7]}, expected {self.dip_switch}; switching to received DIP"
             )
-            return
+            self.dip_switch = data[7]
         self._log("CZone authenticated")
         self.authenticated = True
 
