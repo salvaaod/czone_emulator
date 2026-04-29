@@ -20,7 +20,7 @@ PGN_65280 = 65280
 PGN_65283 = 65283
 PGN_65284 = 65284
 PGN_65290 = 65290
-PGN_127501 = 127501
+PGN_130817 = 130817
 
 CZONE_MESSAGE = 0x9927
 CZONE_DIP_SWITCH_DEFAULT = 1
@@ -167,6 +167,11 @@ class CZone:
     mfd_sync_state1: int = 0
     mfd_sync_state2: int = 0
     dip_switch: int = CZONE_DIP_SWITCH_DEFAULT
+    pending_commands: dict[int, int] | None = None
+
+    def __post_init__(self):
+        if self.pending_commands is None:
+            self.pending_commands = {}
 
     def send(self, pgn, data, priority=7):
         self.dev.send(n2k_id(priority, pgn, SRC), data)
@@ -196,15 +201,22 @@ class CZone:
 
         self.send(PGN_65284, data)
 
-    def status(self):
-        # Mirror .ino behaviour: first two bytes carry MFD display sync state.
-        status = self.mfd_sync_state1 | (self.mfd_sync_state2 << 8)
-        payload = bytes([0]) + status.to_bytes(7, "little")
-        # 127501 is standard N2K switching status and should use prio 3.
-        self.send(PGN_127501, payload, priority=3)
+    def detailed_status(self):
+        # Minimal proprietary 130817 payload with both bank states.
+        # Fast-packet framing is simplified to 2 frames for an 11-byte payload.
+        payload = (
+            u16(CZONE_MESSAGE)
+            + bytes([BANK1, self.state1, BANK2, self.state2, self.mfd_sync_state1, self.mfd_sync_state2, 0x00])
+        )
+        # NMEA2000 fast-packet header byte:
+        # upper 3 bits = sequence id (0..7), lower 5 bits = frame index (0..31).
+        seq = int(time.time() * 1000) & 0x07
+        first = bytes([(seq << 5) | 0x00, len(payload)]) + payload[:6]
+        second = bytes([(seq << 5) | 0x01]) + payload[6:]
+        self.send(PGN_130817, first)
+        self.send(PGN_130817, second)
         self._log(
-            f"TX 127501 status report: sync1=0x{self.mfd_sync_state1:02X} "
-            f"sync2=0x{self.mfd_sync_state2:02X}"
+            f"TX 130817 detailed: bank1=0x{self.state1:02X} bank2=0x{self.state2:02X}"
         )
 
     def ack(self, bank):
@@ -218,17 +230,23 @@ class CZone:
         # Matches .ino: 0x05->0x01, 0x06->0x04, 0x07->0x10, 0x08->0x40.
         return 1 << (2 * ((switch_code - 0x05) % 4))
 
-    def _toggle_switch(self, switch_code: int) -> bool:
+    def _set_switch(self, switch_code: int, is_on: bool) -> bool:
         if switch_code <= 0x08:
             bit = switch_code - 0x05
-            self.state1 ^= 1 << bit
-            self.mfd_sync_state1 ^= self._sync_mask_for_switch_code(switch_code)
-            return bool(self.state1 & (1 << bit))
+            mask = 1 << bit
+            prev = bool(self.state1 & mask)
+            self.state1 = (self.state1 | mask) if is_on else (self.state1 & ~mask)
+            if prev != is_on:
+                self.mfd_sync_state1 ^= self._sync_mask_for_switch_code(switch_code)
+            return bool(self.state1 & mask)
 
         bit = switch_code - 0x09
-        self.state2 ^= 1 << bit
-        self.mfd_sync_state2 ^= self._sync_mask_for_switch_code(switch_code)
-        return bool(self.state2 & (1 << bit))
+        mask = 1 << bit
+        prev = bool(self.state2 & mask)
+        self.state2 = (self.state2 | mask) if is_on else (self.state2 & ~mask)
+        if prev != is_on:
+            self.mfd_sync_state2 ^= self._sync_mask_for_switch_code(switch_code)
+        return bool(self.state2 & mask)
 
     def handle_command(self, data):
         self._log(f"RX 65280 raw: {data.hex(' ')}")
@@ -255,18 +273,27 @@ class CZone:
             return
 
         if cmd in (0xF1, 0xF2):
-            is_on = self._toggle_switch(sw)
+            # Stage command and apply on commit (0x40) to match CZone sequencing.
+            self.pending_commands[sw] = cmd
+            desired = cmd == 0xF1
+            self._log(f"RX 65280 staged: switch=0x{sw:02X} desired={'ON' if desired else 'OFF'}")
+        elif cmd in (0x40, 0x42):
+            staged = self.pending_commands.get(sw)
+            if staged in (0xF1, 0xF2):
+                is_on = self._set_switch(sw, staged == 0xF1)
+                self.pending_commands.pop(sw, None)
+            else:
+                # No staged value for this switch: keep existing state.
+                is_on = bool((self.state1 if sw <= 0x08 else self.state2) & (1 << ((sw - 0x05) % 4)))
             state_text = "ON" if is_on else "OFF"
             switch_id = (sw - 0x05) + 1
             message = f"Switch {switch_id} -> {state_text}"
             self._log(message)
             if self.on_switch_event:
                 self.on_switch_event(sw, is_on)
-
-            self.status()
-        elif cmd in (0x40, 0x42):
-            # End-of-change sync command from MFD.
             self.ack(BANK1 if sw <= 0x08 else BANK2)
+            self.heartbeat(BANK1 if sw <= 0x08 else BANK2)
+            self.detailed_status()
         else:
             self._log(f"RX 65280 ignored: unsupported command 0x{cmd:02X}")
 
@@ -300,7 +327,7 @@ class CZone:
     def periodic(self):
         self.heartbeat(BANK1)
         self.heartbeat(BANK2)
-        self.status()
+        self.detailed_status()
         if self.authenticated:
             self.ack(BANK1)
             self.ack(BANK2)
@@ -394,7 +421,7 @@ class CZoneGui:
 
         if now - self.last_status > 10:
             self.last_status = now
-            self.czone.status()
+            self.czone.detailed_status()
 
         self.refresh_switch_states()
 
