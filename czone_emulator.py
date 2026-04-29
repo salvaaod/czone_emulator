@@ -14,16 +14,37 @@ CAN_INDEX = 0
 TIMING0_250K = 0x01
 TIMING1_250K = 0x1C
 
-SRC = 1
+SRC = 0
 
+PGN_60928 = 60928
+PGN_59904 = 59904
 PGN_65280 = 65280
 PGN_65283 = 65283
 PGN_65284 = 65284
 PGN_65290 = 65290
+PGN_126996 = 126996
 PGN_130817 = 130817
 
 CZONE_MESSAGE = 0x9927
 CZONE_DIP_SWITCH_DEFAULT = 1
+
+N2K_UNIQUE_NUMBER = 197135
+N2K_MANUFACTURER_CODE = 295
+N2K_DEVICE_INSTANCE_LOWER = 2
+N2K_DEVICE_INSTANCE_UPPER = 0
+N2K_DEVICE_FUNCTION = 140
+N2K_DEVICE_CLASS = 30
+N2K_SYSTEM_INSTANCE = 0
+N2K_INDUSTRY_GROUP = 4
+
+N2K_DB_VERSION = 2000
+N2K_CERTIFICATION_LEVEL = 0
+N2K_LOAD_EQUIVALENCY = 0
+N2K_MANUFACTURER_PRODUCT_CODE = 18830
+N2K_MODEL_ID = "01 (80-911-0010-00)"
+N2K_SOFTWARE_ID = "6.26.24.0"
+N2K_HARDWARE_ID = "A"
+N2K_SERIAL_ID = "J4616585-0068"
 
 BANK1 = 0x1D
 BANK2 = 0x1B
@@ -149,8 +170,32 @@ def parse_pgn(can_id):
     return (pf << 8) | ps
 
 
+def parse_src(can_id):
+    return can_id & 0xFF
+
+
 def u16(v):
     return bytes([v & 0xFF, (v >> 8) & 0xFF])
+
+
+def n2k_string_field(text: str, field_len: int = 32) -> bytes:
+    raw = text.encode("ascii", errors="ignore")[: field_len - 1]
+    return raw + b"\x00" + (b"\xFF" * (field_len - len(raw) - 1))
+
+
+def encode_iso_name() -> bytes:
+    value = 0
+    value |= N2K_UNIQUE_NUMBER & 0x1FFFFF
+    value |= (N2K_MANUFACTURER_CODE & 0x7FF) << 21
+    value |= (N2K_DEVICE_INSTANCE_LOWER & 0x07) << 32
+    value |= (N2K_DEVICE_INSTANCE_UPPER & 0x1F) << 35
+    value |= (N2K_DEVICE_FUNCTION & 0xFF) << 40
+    value |= 0 << 48  # Reserved
+    value |= (N2K_DEVICE_CLASS & 0x7F) << 49
+    value |= (N2K_SYSTEM_INSTANCE & 0x0F) << 56
+    value |= (N2K_INDUSTRY_GROUP & 0x07) << 60
+    value |= 1 << 63  # Reserved bit
+    return value.to_bytes(8, "little")
 
 
 # ---------------- CZONE DEVICE ----------------
@@ -175,6 +220,22 @@ class CZone:
 
     def send(self, pgn, data, priority=7):
         self.dev.send(n2k_id(priority, pgn, SRC), data)
+
+    def send_fast_packet(self, pgn: int, payload: bytes, priority: int = 6):
+        seq = int(time.time() * 1000) & 0x07
+        frame_index = 0
+        offset = 0
+        first = bytes([(seq << 5) | frame_index, len(payload)]) + payload[:6]
+        self.send(pgn, first, priority=priority)
+        frame_index += 1
+        offset = 6
+
+        while offset < len(payload):
+            chunk = payload[offset : offset + 7]
+            frame = bytes([(seq << 5) | frame_index]) + chunk
+            self.send(pgn, frame, priority=priority)
+            frame_index += 1
+            offset += 7
 
     def _log(self, message: str):
         print(message)
@@ -203,21 +264,31 @@ class CZone:
 
     def detailed_status(self):
         # Minimal proprietary 130817 payload with both bank states.
-        # Fast-packet framing is simplified to 2 frames for an 11-byte payload.
         payload = (
             u16(CZONE_MESSAGE)
             + bytes([BANK1, self.state1, BANK2, self.state2, self.mfd_sync_state1, self.mfd_sync_state2, 0x00])
         )
-        # NMEA2000 fast-packet header byte:
-        # upper 3 bits = sequence id (0..7), lower 5 bits = frame index (0..31).
-        seq = int(time.time() * 1000) & 0x07
-        first = bytes([(seq << 5) | 0x00, len(payload)]) + payload[:6]
-        second = bytes([(seq << 5) | 0x01]) + payload[6:]
-        self.send(PGN_130817, first)
-        self.send(PGN_130817, second)
+        self.send_fast_packet(PGN_130817, payload, priority=7)
         self._log(
             f"TX 130817 detailed: bank1=0x{self.state1:02X} bank2=0x{self.state2:02X}"
         )
+
+    def address_claim(self):
+        self.send(PGN_60928, encode_iso_name(), priority=6)
+        self._log("TX 60928 ISO address claim")
+
+    def product_information(self):
+        payload = (
+            u16(N2K_DB_VERSION)
+            + u16(N2K_MANUFACTURER_PRODUCT_CODE)
+            + n2k_string_field(N2K_MODEL_ID)
+            + n2k_string_field(N2K_SOFTWARE_ID)
+            + n2k_string_field(N2K_HARDWARE_ID)
+            + n2k_string_field(N2K_SERIAL_ID)
+            + bytes([N2K_CERTIFICATION_LEVEL & 0xFF, N2K_LOAD_EQUIVALENCY & 0xFF])
+        )
+        self.send_fast_packet(PGN_126996, payload, priority=6)
+        self._log("TX 126996 product information")
 
     def ack(self, bank):
         sync_state = self.mfd_sync_state1 if bank == BANK1 else self.mfd_sync_state2
@@ -260,10 +331,16 @@ class CZone:
             return
 
         if data[5] != self.dip_switch:
-            self._log(
-                f"RX 65280 ignored: DIP mismatch, got {data[5]}, expected {self.dip_switch}"
-            )
-            return
+            if self.authenticated:
+                self._log(
+                    f"RX 65280 DIP auto-adjust: got {data[5]}, expected {self.dip_switch}; switching to received DIP"
+                )
+                self.dip_switch = data[5]
+            else:
+                self._log(
+                    f"RX 65280 ignored: DIP mismatch, got {data[5]}, expected {self.dip_switch}"
+                )
+                return
 
         sw = data[2]
         cmd = data[6]
@@ -306,11 +383,22 @@ class CZone:
             return
         if data[7] != self.dip_switch:
             self._log(
-                f"RX 65290 ignored: DIP mismatch, got {data[7]}, expected {self.dip_switch}"
+                f"RX 65290 DIP auto-adjust: got {data[7]}, expected {self.dip_switch}; switching to received DIP"
             )
-            return
+            self.dip_switch = data[7]
         self._log("CZone authenticated")
         self.authenticated = True
+
+    def handle_request(self, src: int, data: bytes):
+        if len(data) < 3:
+            return
+        requested_pgn = data[0] | (data[1] << 8) | (data[2] << 16)
+        if requested_pgn == PGN_60928:
+            self._log(f"RX 59904 request from {src}: PGN 60928")
+            self.address_claim()
+        elif requested_pgn == PGN_126996:
+            self._log(f"RX 59904 request from {src}: PGN 126996")
+            self.product_information()
 
     def process_rx(self):
         frames = self.dev.recv()
@@ -318,13 +406,18 @@ class CZone:
         for f in frames:
             data = bytes(f.Data[:f.DataLen])
             pgn = parse_pgn(f.ID)
+            src = parse_src(f.ID)
 
             if pgn == PGN_65280:
                 self.handle_command(data)
             elif pgn == PGN_65290:
                 self.handle_config(data)
+            elif pgn == PGN_59904:
+                self.handle_request(src, data)
 
     def periodic(self):
+        self.address_claim()
+        self.product_information()
         self.heartbeat(BANK1)
         self.heartbeat(BANK2)
         self.detailed_status()
@@ -367,6 +460,7 @@ class CZoneGui:
         self.last_heartbeat = now
         self.last_ack = now
         self.last_status = now
+        self.last_n2k_identity = now - 60
 
     def append_log(self, message: str):
         timestamp = time.strftime("%H:%M:%S")
@@ -414,6 +508,11 @@ class CZoneGui:
             self.czone.heartbeat(BANK2)
             self.status_label.configure(text="Heartbeat sent")
 
+        if now - self.last_n2k_identity > 60:
+            self.last_n2k_identity = now
+            self.czone.address_claim()
+            self.czone.product_information()
+
         if self.czone.authenticated and now - self.last_ack > 0.5:
             self.last_ack = now
             self.czone.ack(BANK1)
@@ -430,6 +529,8 @@ class CZoneGui:
     def run(self):
         print("CZone emulator GUI running...")
         self.append_log("CZone emulator GUI running...")
+        self.czone.address_claim()
+        self.czone.product_information()
         self.refresh_switch_states()
         self.poll_can()
         self.root.mainloop()
