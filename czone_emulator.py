@@ -391,7 +391,7 @@ class CZoneGui:
         self.czone = czone
         self.root = tk.Tk()
         self.root.title("CZone Emulator")
-        self.root.geometry("620x420")
+        self.root.resizable(False, False)
 
         tk.Label(self.root, text="Received CZone Switch Commands", font=("Arial", 12, "bold")).pack(
             pady=(10, 4)
