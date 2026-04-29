@@ -17,6 +17,7 @@ TIMING1_250K = 0x1C
 SRC = 0
 
 PGN_60928 = 60928
+PGN_59904 = 59904
 PGN_65280 = 65280
 PGN_65283 = 65283
 PGN_65284 = 65284
@@ -167,6 +168,10 @@ def parse_pgn(can_id):
     if pf < 240:
         return pf << 8
     return (pf << 8) | ps
+
+
+def parse_src(can_id):
+    return can_id & 0xFF
 
 
 def u16(v):
@@ -384,17 +389,31 @@ class CZone:
         self._log("CZone authenticated")
         self.authenticated = True
 
+    def handle_request(self, src: int, data: bytes):
+        if len(data) < 3:
+            return
+        requested_pgn = data[0] | (data[1] << 8) | (data[2] << 16)
+        if requested_pgn == PGN_60928:
+            self._log(f"RX 59904 request from {src}: PGN 60928")
+            self.address_claim()
+        elif requested_pgn == PGN_126996:
+            self._log(f"RX 59904 request from {src}: PGN 126996")
+            self.product_information()
+
     def process_rx(self):
         frames = self.dev.recv()
 
         for f in frames:
             data = bytes(f.Data[:f.DataLen])
             pgn = parse_pgn(f.ID)
+            src = parse_src(f.ID)
 
             if pgn == PGN_65280:
                 self.handle_command(data)
             elif pgn == PGN_65290:
                 self.handle_config(data)
+            elif pgn == PGN_59904:
+                self.handle_request(src, data)
 
     def periodic(self):
         self.address_claim()
