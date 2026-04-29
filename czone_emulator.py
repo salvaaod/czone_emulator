@@ -14,16 +14,32 @@ CAN_INDEX = 0
 TIMING0_250K = 0x01
 TIMING1_250K = 0x1C
 
-SRC = 1
+SRC = 0
 
+PGN_60928 = 60928
 PGN_65280 = 65280
 PGN_65283 = 65283
 PGN_65284 = 65284
 PGN_65290 = 65290
+PGN_126996 = 126996
 PGN_130817 = 130817
 
 CZONE_MESSAGE = 0x9927
 CZONE_DIP_SWITCH_DEFAULT = 1
+
+N2K_UNIQUE_NUMBER = 197135
+N2K_MANUFACTURER_CODE = 295
+N2K_DEVICE_INSTANCE_LOWER = 2
+N2K_DEVICE_INSTANCE_UPPER = 0
+N2K_DEVICE_FUNCTION = 140
+N2K_DEVICE_CLASS = 30
+N2K_SYSTEM_INSTANCE = 0
+N2K_INDUSTRY_GROUP = 4
+
+N2K_DB_VERSION = 0
+N2K_CERTIFICATION_LEVEL = 0
+N2K_LOAD_EQUIVALENCY = 0
+N2K_MANUFACTURER_PRODUCT_CODE = 0
 
 BANK1 = 0x1D
 BANK2 = 0x1B
@@ -153,6 +169,21 @@ def u16(v):
     return bytes([v & 0xFF, (v >> 8) & 0xFF])
 
 
+def encode_iso_name() -> bytes:
+    value = 0
+    value |= N2K_UNIQUE_NUMBER & 0x1FFFFF
+    value |= (N2K_MANUFACTURER_CODE & 0x7FF) << 21
+    value |= (N2K_DEVICE_INSTANCE_LOWER & 0x07) << 32
+    value |= (N2K_DEVICE_INSTANCE_UPPER & 0x1F) << 35
+    value |= (N2K_DEVICE_FUNCTION & 0xFF) << 40
+    value |= 0 << 48  # Reserved
+    value |= (N2K_DEVICE_CLASS & 0x7F) << 49
+    value |= (N2K_SYSTEM_INSTANCE & 0x0F) << 56
+    value |= (N2K_INDUSTRY_GROUP & 0x07) << 60
+    value |= 1 << 63  # Reserved bit
+    return value.to_bytes(8, "little")
+
+
 # ---------------- CZONE DEVICE ----------------
 
 
@@ -175,6 +206,22 @@ class CZone:
 
     def send(self, pgn, data, priority=7):
         self.dev.send(n2k_id(priority, pgn, SRC), data)
+
+    def send_fast_packet(self, pgn: int, payload: bytes, priority: int = 6):
+        seq = int(time.time() * 1000) & 0x07
+        frame_index = 0
+        offset = 0
+        first = bytes([(seq << 5) | frame_index, len(payload)]) + payload[:6]
+        self.send(pgn, first, priority=priority)
+        frame_index += 1
+        offset = 6
+
+        while offset < len(payload):
+            chunk = payload[offset : offset + 7]
+            frame = bytes([(seq << 5) | frame_index]) + chunk
+            self.send(pgn, frame, priority=priority)
+            frame_index += 1
+            offset += 7
 
     def _log(self, message: str):
         print(message)
@@ -203,21 +250,41 @@ class CZone:
 
     def detailed_status(self):
         # Minimal proprietary 130817 payload with both bank states.
-        # Fast-packet framing is simplified to 2 frames for an 11-byte payload.
         payload = (
             u16(CZONE_MESSAGE)
             + bytes([BANK1, self.state1, BANK2, self.state2, self.mfd_sync_state1, self.mfd_sync_state2, 0x00])
         )
-        # NMEA2000 fast-packet header byte:
-        # upper 3 bits = sequence id (0..7), lower 5 bits = frame index (0..31).
-        seq = int(time.time() * 1000) & 0x07
-        first = bytes([(seq << 5) | 0x00, len(payload)]) + payload[:6]
-        second = bytes([(seq << 5) | 0x01]) + payload[6:]
-        self.send(PGN_130817, first)
-        self.send(PGN_130817, second)
+        self.send_fast_packet(PGN_130817, payload, priority=7)
         self._log(
             f"TX 130817 detailed: bank1=0x{self.state1:02X} bank2=0x{self.state2:02X}"
         )
+
+    def address_claim(self):
+        self.send(PGN_60928, encode_iso_name(), priority=6)
+        self._log("TX 60928 ISO address claim")
+
+    def product_information(self):
+        model_id = b""
+        software_id = b""
+        hardware_id = b""
+        serial_id = b""
+        cert_field = (N2K_CERTIFICATION_LEVEL & 0x07) << 5 | (N2K_LOAD_EQUIVALENCY & 0x1F)
+        payload = (
+            u16(N2K_DB_VERSION)
+            + u16(N2K_MANUFACTURER_PRODUCT_CODE)
+            + bytes([cert_field])
+            + b"\x00"  # reserved
+            + model_id
+            + b"\x00"
+            + software_id
+            + b"\x00"
+            + hardware_id
+            + b"\x00"
+            + serial_id
+            + b"\x00"
+        )
+        self.send_fast_packet(PGN_126996, payload, priority=6)
+        self._log("TX 126996 product information")
 
     def ack(self, bank):
         sync_state = self.mfd_sync_state1 if bank == BANK1 else self.mfd_sync_state2
@@ -325,6 +392,8 @@ class CZone:
                 self.handle_config(data)
 
     def periodic(self):
+        self.address_claim()
+        self.product_information()
         self.heartbeat(BANK1)
         self.heartbeat(BANK2)
         self.detailed_status()
@@ -367,6 +436,7 @@ class CZoneGui:
         self.last_heartbeat = now
         self.last_ack = now
         self.last_status = now
+        self.last_n2k_identity = now - 60
 
     def append_log(self, message: str):
         timestamp = time.strftime("%H:%M:%S")
@@ -414,6 +484,11 @@ class CZoneGui:
             self.czone.heartbeat(BANK2)
             self.status_label.configure(text="Heartbeat sent")
 
+        if now - self.last_n2k_identity > 60:
+            self.last_n2k_identity = now
+            self.czone.address_claim()
+            self.czone.product_information()
+
         if self.czone.authenticated and now - self.last_ack > 0.5:
             self.last_ack = now
             self.czone.ack(BANK1)
@@ -430,6 +505,8 @@ class CZoneGui:
     def run(self):
         print("CZone emulator GUI running...")
         self.append_log("CZone emulator GUI running...")
+        self.czone.address_claim()
+        self.czone.product_information()
         self.refresh_switch_states()
         self.poll_can()
         self.root.mainloop()
