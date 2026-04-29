@@ -15,6 +15,8 @@ TIMING0_250K = 0x01
 TIMING1_250K = 0x1C
 
 SRC = 2
+CAN_ID_1CFF0802 = 0x1CFF0802
+PAYLOAD_1CFF0802 = bytes([0x3B, 0x9F, 0xFF, 0x00, 0x78, 0xAC, 0x00, 0x80])
 
 PGN_60928 = 60928
 PGN_59904 = 59904
@@ -208,6 +210,7 @@ class CZone:
     on_switch_event: Optional[Callable[[int, bool], None]] = None
     dip_switch: int = CZONE_DIP_SWITCH_DEFAULT
     pending_commands: dict[int, int] | None = None
+    tx_1cff0802_enabled: bool = False
 
     def __post_init__(self):
         if self.pending_commands is None:
@@ -379,6 +382,10 @@ class CZone:
             elif pgn == PGN_59904:
                 self.handle_request(src, data)
 
+    def send_1cff0802(self):
+        if self.tx_1cff0802_enabled:
+            self.dev.send(CAN_ID_1CFF0802, PAYLOAD_1CFF0802)
+
     def periodic(self):
         self.address_claim()
         self.product_information()
@@ -425,11 +432,22 @@ class CZoneGui:
         self.status_label = tk.Label(self.root, text="Waiting for CAN messages...")
         self.status_label.pack(pady=(0, 10))
 
+        tx_frame = tk.Frame(self.root)
+        tx_frame.pack(pady=(0, 10))
+        self.tx_1cff0802_var = tk.BooleanVar(value=self.czone.tx_1cff0802_enabled)
+        tk.Checkbutton(
+            tx_frame,
+            text="Send 0x1CFF0802 every second",
+            variable=self.tx_1cff0802_var,
+            command=self.toggle_1cff0802,
+        ).pack(side="left")
+
         self.czone.on_switch_event = self.record_switch_event
         now = time.time()
         self.last_heartbeat = now
         self.last_status = now
         self.last_n2k_identity = now - 60
+        self.last_1cff0802 = now
 
     def append_log(self, message: str):
         print(message)
@@ -490,9 +508,18 @@ class CZoneGui:
             self.last_status = now
             self.czone.detailed_status()
 
+        if now - self.last_1cff0802 >= 1:
+            self.last_1cff0802 = now
+            self.czone.send_1cff0802()
+
         self.refresh_switch_states()
 
         self.root.after(50, self.poll_can)
+
+    def toggle_1cff0802(self):
+        enabled = self.tx_1cff0802_var.get()
+        self.czone.tx_1cff0802_enabled = enabled
+        self.append_log(f"Periodic TX 0x1CFF0802 {'enabled' if enabled else 'disabled'}")
 
     def run(self):
         print("CZone emulator GUI running...")
