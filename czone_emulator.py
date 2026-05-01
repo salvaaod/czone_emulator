@@ -207,12 +207,13 @@ def encode_iso_name() -> bytes:
 class CZone:
     dev: GCAN
     state: int = 0
-    authenticated: bool = False
+    authenticated: bool = True
     on_switch_event: Optional[Callable[[int, bool], None]] = None
     dip_switch: int = CZONE_DIP_SWITCH_DEFAULT
     pending_commands: dict[int, int] | None = None
 
     def __post_init__(self):
+        self._log("CZone startup: pre-authenticated for immediate display sync")
         if self.pending_commands is None:
             self.pending_commands = {}
         # Default currents are 0.0 A for all outputs at startup.
