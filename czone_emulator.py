@@ -214,10 +214,9 @@ class CZone:
     def __post_init__(self):
         if self.pending_commands is None:
             self.pending_commands = {}
-        # Compatibility defaults copied from prior fixed-status behavior:
-        # output1=0.2A, output2=0.0A, output3=0.8A, output4=0.0A.
-        # Outputs 5-6 are reserved and always encoded as 0.0 A for now.
-        self.output_current_tenths = {1: 2, 2: 0, 3: 8, 4: 0, 5: 0, 6: 0}
+        # Default currents are 0.0 A for all outputs at startup.
+        # Outputs 5-6 remain reserved and fixed at 0.0 A.
+        self.output_current_tenths = {idx: 0 for idx in range(1, OUTPUT_COUNT + 1)}
 
     def _normalize_current_tenths(self, value: int) -> int:
         return max(0, min(255, int(value)))
@@ -287,7 +286,8 @@ class CZone:
         for output_index in range(1, OUTPUT_COUNT + 1):
             current_tenths = self.get_output_current_tenths(output_index)
             if output_index <= ADJUSTABLE_OUTPUT_COUNT:
-                payload.extend([current_tenths, 0xE8, 0x07])
+                # Use the same trailing bytes that prior fixed payloads used so MFD decoding remains compatible.
+                payload.extend([current_tenths, 0x00, 0x04])
             else:
                 payload.extend([0x00, 0x00, 0x04])
 
