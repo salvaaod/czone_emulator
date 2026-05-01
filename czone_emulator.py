@@ -207,13 +207,13 @@ def encode_iso_name() -> bytes:
 class CZone:
     dev: GCAN
     state: int = 0
-    authenticated: bool = True
+    authenticated: bool = False
     on_switch_event: Optional[Callable[[int, bool], None]] = None
     dip_switch: int = CZONE_DIP_SWITCH_DEFAULT
     pending_commands: dict[int, int] | None = None
 
     def __post_init__(self):
-        self._log("CZone startup: pre-authenticated for immediate display sync")
+        self._log("CZone startup: waiting for MFD authentication handshake")
         if self.pending_commands is None:
             self.pending_commands = {}
         # Default currents are 0.0 A for all outputs at startup.
@@ -569,6 +569,8 @@ class CZoneGui:
         print("CZone emulator GUI running...")
         self.czone.address_claim()
         self.czone.product_information()
+        self.czone.heartbeat()
+        self.czone.detailed_status()
         self.refresh_switch_states()
         self.poll_can()
         self.root.mainloop()
