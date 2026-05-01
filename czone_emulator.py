@@ -351,9 +351,9 @@ class CZone:
 
         if data[5] != self.dip_switch:
             self._log(
-                f"RX 65280 DIP auto-adjust: got {data[5]}, expected {self.dip_switch}; switching to received DIP"
+                f"RX 65280 ignored: DIP mismatch, got {data[5]}, expected {self.dip_switch}"
             )
-            self.dip_switch = data[5]
+            return
 
         if not self.authenticated:
             self.authenticated = True
@@ -398,9 +398,9 @@ class CZone:
             return
         if data[7] != self.dip_switch:
             self._log(
-                f"RX 65290 DIP auto-adjust: got {data[7]}, expected {self.dip_switch}; switching to received DIP"
+                f"RX 65290 ignored: DIP mismatch, got {data[7]}, expected {self.dip_switch}"
             )
-            self.dip_switch = data[7]
+            return
         self._log("CZone authenticated")
         self.authenticated = True
 
@@ -449,12 +449,7 @@ class CZoneGui:
         )
         dip_frame = tk.Frame(self.root)
         dip_frame.pack(pady=(0, 6))
-        tk.Label(dip_frame, text="CZone DIP:").pack(side="left")
-        self.dip_var = tk.StringVar(value=str(self.czone.dip_switch))
-        self.dip_entry = tk.Entry(dip_frame, textvariable=self.dip_var, width=6)
-        self.dip_entry.pack(side="left", padx=(6, 6))
-        self.dip_entry.bind("<Return>", lambda _: self.apply_dip())
-        tk.Button(dip_frame, text="Apply", command=self.apply_dip).pack(side="left")
+        tk.Label(dip_frame, text=f"CZone DIP (fixed): {self.czone.dip_switch}").pack(side="left")
 
         self.switches_label = tk.Label(self.root, text="Switch states: S1: OFF    S2: OFF    S3: OFF    S4: OFF")
         self.switches_label.pack(pady=(0, 14))
@@ -507,23 +502,6 @@ class CZoneGui:
 
     def append_log(self, message: str):
         print(message)
-
-    def apply_dip(self):
-        raw = self.dip_var.get().strip()
-        try:
-            dip_value = int(raw, 0)
-        except ValueError:
-            self.append_log(f"Invalid DIP value '{raw}'. Keep current {self.czone.dip_switch}.")
-            self.dip_var.set(str(self.czone.dip_switch))
-            return
-
-        if not (0 <= dip_value <= 255):
-            self.append_log(f"Invalid DIP value '{raw}'. Expected 0..255.")
-            self.dip_var.set(str(self.czone.dip_switch))
-            return
-
-        self.czone.dip_switch = dip_value
-        self.append_log(f"CZone DIP updated to {dip_value}.")
 
     def refresh_switch_states(self):
         states = self.czone.get_switch_states()
