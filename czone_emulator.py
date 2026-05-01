@@ -214,9 +214,10 @@ class CZone:
     def __post_init__(self):
         if self.pending_commands is None:
             self.pending_commands = {}
-        # Default currents for user-adjustable outputs 1-4 are 0.1 A (1 tenth).
+        # Compatibility defaults copied from prior fixed-status behavior:
+        # output1=0.2A, output2=0.0A, output3=0.8A, output4=0.0A.
         # Outputs 5-6 are reserved and always encoded as 0.0 A for now.
-        self.output_current_tenths = {idx: (1 if idx <= ADJUSTABLE_OUTPUT_COUNT else 0) for idx in range(1, OUTPUT_COUNT + 1)}
+        self.output_current_tenths = {1: 2, 2: 0, 3: 8, 4: 0, 5: 0, 6: 0}
 
     def _normalize_current_tenths(self, value: int) -> int:
         return max(0, min(255, int(value)))
@@ -294,7 +295,10 @@ class CZone:
             payload.append(0xFF)
 
         self.send_fast_packet(PGN_130817, payload, priority=7)
-        currents_hex = " ".join(f"O{i}:{self.get_output_current_tenths(i):02X}" for i in range(1, ADJUSTABLE_OUTPUT_COUNT + 1))
+        currents_hex = " ".join(
+            f"O{i}:{self.get_output_current_tenths(i):02X}/{self.get_output_current(i):.1f}A"
+            for i in range(1, ADJUSTABLE_OUTPUT_COUNT + 1)
+        )
         self._log(f"TX 130817 detailed: dip=0x{self.dip_switch:02X} state=0x{self.state:02X} currents=[{currents_hex}]")
 
     def address_claim(self):
