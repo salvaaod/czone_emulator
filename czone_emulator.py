@@ -282,25 +282,15 @@ class CZone:
         self.send(PGN_65284, data)
 
     def detailed_status(self):
-        payload = bytearray(u16(CZONE_MESSAGE) + bytes([0x00, self.dip_switch]))
-
-        for output_index in range(1, OUTPUT_COUNT + 1):
-            if output_index <= ADJUSTABLE_OUTPUT_COUNT:
-                # Temporary validation mode: encode the same fixed currents used by legacy payload checks.
-                current_tenths = LEGACY_FIXED_CURRENTS_TENTHS[output_index - 1]
-                payload.extend([current_tenths, 0x00, 0x04])
-            else:
-                payload.extend([0x00, 0x00, 0x04])
-
+        # Reverted to legacy PGN 130817 payload format used before current-model changes.
+        payload = bytearray(u16(CZONE_MESSAGE) + bytes([0x00, BANK_ID]))
+        for circuit in range(4):
+            state = 0x01 if (self.state & (1 << circuit)) else 0x00
+            payload.extend([state, 0x00, 0x04, 0x00])
         while len(payload) < 28:
             payload.append(0xFF)
-
         self.send_fast_packet(PGN_130817, payload, priority=7)
-        currents_hex = " ".join(
-            f"O{i}:{LEGACY_FIXED_CURRENTS_TENTHS[i - 1]:02X}/{LEGACY_FIXED_CURRENTS_TENTHS[i - 1] / 10.0:.1f}A"
-            for i in range(1, ADJUSTABLE_OUTPUT_COUNT + 1)
-        )
-        self._log(f"TX 130817 detailed: dip=0x{self.dip_switch:02X} state=0x{self.state:02X} currents=[{currents_hex}]")
+        self._log(f"TX 130817 detailed: bank=0x{BANK_ID:02X} state=0x{self.state:02X}")
 
     def address_claim(self):
         self.send(PGN_60928, encode_iso_name(), priority=6)
