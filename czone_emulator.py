@@ -218,6 +218,7 @@ class CZone:
         # Default currents are 0.0 A for all outputs at startup.
         # Outputs 5-6 remain reserved and fixed at 0.0 A.
         self.output_current_tenths = {idx: 0 for idx in range(1, OUTPUT_COUNT + 1)}
+        self.output_block_overrides: dict[int, tuple[int, int, int, int]] = {}
 
     def _normalize_current_tenths(self, value: int) -> int:
         return max(0, min(255, int(value)))
@@ -243,6 +244,15 @@ class CZone:
 
     def get_output_current(self, output_index: int) -> float:
         return self.get_output_current_tenths(output_index) / 10.0
+
+    def set_output_block_override(self, output_index: int, b0: int, b1: int, b2: int, b3: int):
+        if output_index not in (1, 2):
+            raise ValueError("Only outputs 1 and 2 support manual low-level block override")
+        values = tuple(max(0, min(255, int(v))) for v in (b0, b1, b2, b3))
+        self.output_block_overrides[output_index] = values
+
+    def clear_output_block_override(self, output_index: int):
+        self.output_block_overrides.pop(output_index, None)
 
     def send(self, pgn, data, priority=7):
         self.dev.send(n2k_id(priority, pgn, SRC), data)
@@ -285,6 +295,11 @@ class CZone:
         # Reverted to legacy PGN 130817 payload format used before current-model changes.
         payload = bytearray(u16(CZONE_MESSAGE) + bytes([0x00, BANK_ID]))
         for circuit in range(4):
+            output_index = circuit + 1
+            override = self.output_block_overrides.get(output_index)
+            if override is not None:
+                payload.extend(override)
+                continue
             state = 0x01 if (self.state & (1 << circuit)) else 0x00
             payload.extend([state, 0x00, 0x04, 0x00])
         while len(payload) < 28:
@@ -477,6 +492,20 @@ class CZoneGui:
             spin.bind("<FocusOut>", lambda _, idx=output_index: self.apply_output_current(idx))
             self.current_vars[output_index] = var
 
+        override_frame = tk.LabelFrame(self.root, text="Low-level O1/O2 bytes (hex: b0 b1 b2 b3)")
+        override_frame.pack(pady=(0, 10), padx=8, fill="x")
+        self.block_override_vars = {}
+        for output_index in (1, 2):
+            row = tk.Frame(override_frame)
+            row.pack(fill="x", padx=6, pady=2)
+            tk.Label(row, text=f"Output {output_index}", width=10, anchor="w").pack(side="left")
+            var = tk.StringVar(value="")
+            entry = tk.Entry(row, textvariable=var, width=16)
+            entry.pack(side="left", padx=(0, 6))
+            tk.Button(row, text="Apply", command=lambda idx=output_index: self.apply_block_override(idx)).pack(side="left", padx=(0, 4))
+            tk.Button(row, text="Clear", command=lambda idx=output_index: self.clear_block_override(idx)).pack(side="left")
+            self.block_override_vars[output_index] = var
+
         self.status_label = tk.Label(self.root, text="Waiting for CAN messages...")
         self.status_label.pack(pady=(0, 10))
 
@@ -534,6 +563,29 @@ class CZoneGui:
         normalized = self.czone.get_output_current(output_index)
         self.current_vars[output_index].set(f"{normalized:.1f}")
         self.append_log(f"Manual output {output_index} current -> {normalized:.1f} A")
+        self.czone.detailed_status()
+
+    def apply_block_override(self, output_index: int):
+        raw = self.block_override_vars[output_index].get().strip()
+        parts = raw.replace(",", " ").split()
+        if len(parts) != 4:
+            self.append_log(f"Output {output_index} override needs 4 hex bytes (example: 01 00 04 00).")
+            return
+        try:
+            values = [int(p, 16) for p in parts]
+        except ValueError:
+            self.append_log(f"Invalid hex bytes for output {output_index}: '{raw}'")
+            return
+        self.czone.set_output_block_override(output_index, *values)
+        normalized = " ".join(f"{v:02X}" for v in self.czone.output_block_overrides[output_index])
+        self.block_override_vars[output_index].set(normalized)
+        self.append_log(f"Output {output_index} override -> {normalized}")
+        self.czone.detailed_status()
+
+    def clear_block_override(self, output_index: int):
+        self.czone.clear_output_block_override(output_index)
+        self.block_override_vars[output_index].set("")
+        self.append_log(f"Output {output_index} override cleared")
         self.czone.detailed_status()
 
     def record_switch_event(self, switch_code: int, is_on: bool):
