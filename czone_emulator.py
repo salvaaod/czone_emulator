@@ -515,6 +515,10 @@ class CZoneGui:
         switch_code = 0x04 + switch_id
         updated = self.czone._set_switch(switch_code, is_on)
         self.append_log(f"Manual switch {switch_id} -> {'ON' if updated else 'OFF'}")
+        # Re-announce identity on manual actions so displays that keep stale session
+        # state after emulator restart resync without requiring a display-side key press.
+        self.czone.address_claim()
+        self.czone.product_information()
         self.czone.heartbeat()
         self.czone.detailed_status()
         self.refresh_switch_states()
