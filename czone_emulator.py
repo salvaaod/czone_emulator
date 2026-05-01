@@ -500,6 +500,7 @@ class CZoneGui:
         self.last_heartbeat = now
         self.last_status = now
         self.last_n2k_identity = now - 60
+        self.startup_burst_remaining = 0
 
     def append_log(self, message: str):
         print(message)
@@ -565,12 +566,25 @@ class CZoneGui:
 
         self.root.after(50, self.poll_can)
 
+    def start_startup_burst(self, repeats: int = 3, interval_ms: int = 150):
+        self.startup_burst_remaining = max(0, int(repeats))
+
+        def _send_once():
+            if self.startup_burst_remaining <= 0:
+                return
+            self.czone.address_claim()
+            self.czone.product_information()
+            self.czone.heartbeat()
+            self.czone.detailed_status()
+            self.startup_burst_remaining -= 1
+            if self.startup_burst_remaining > 0:
+                self.root.after(interval_ms, _send_once)
+
+        _send_once()
+
     def run(self):
         print("CZone emulator GUI running...")
-        self.czone.address_claim()
-        self.czone.product_information()
-        self.czone.heartbeat()
-        self.czone.detailed_status()
+        self.start_startup_burst(repeats=3, interval_ms=150)
         self.refresh_switch_states()
         self.poll_can()
         self.root.mainloop()
