@@ -19,7 +19,6 @@ SRC = 2
 PGN_60928 = 60928
 PGN_59904 = 59904
 PGN_65280 = 65280
-PGN_65283 = 65283
 PGN_65284 = 65284
 PGN_65290 = 65290
 PGN_126996 = 126996
@@ -292,11 +291,6 @@ class CZone:
 
         self.send(PGN_65284, data)
 
-    def switch_change_ack(self):
-        # Mirror Arduino reference behavior: periodic display sync/ack frame.
-        data = u16(CZONE_MESSAGE) + bytes([BANK_ID, self.state, 0x00, 0x00, 0x00, 0x10])
-        self.send(PGN_65283, data)
-
     def detailed_status(self):
         # Legacy PGN 130817 layout: header + six 4-byte output blocks = 28 bytes.
         # Current mapping discovered from bench testing:
@@ -503,10 +497,8 @@ class CZoneGui:
         self.czone.on_switch_event = self.record_switch_event
         now = time.time()
         self.last_heartbeat = now
-        self.last_ack = now
         self.last_status = now
         self.last_n2k_identity = now - 60
-        self.startup_burst_remaining = 0
 
     def append_log(self, message: str):
         print(message)
@@ -559,10 +551,6 @@ class CZoneGui:
             self.czone.heartbeat()
             self.status_label.configure(text="Heartbeat sent")
 
-        if now - self.last_ack > 0.5:
-            self.last_ack = now
-            self.czone.switch_change_ack()
-
         if now - self.last_n2k_identity > 60:
             self.last_n2k_identity = now
             self.czone.address_claim()
@@ -576,26 +564,10 @@ class CZoneGui:
 
         self.root.after(50, self.poll_can)
 
-    def start_startup_burst(self, repeats: int = 3, interval_ms: int = 150):
-        self.startup_burst_remaining = max(0, int(repeats))
-
-        def _send_once():
-            if self.startup_burst_remaining <= 0:
-                return
-            self.czone.address_claim()
-            self.czone.product_information()
-            self.czone.heartbeat()
-            self.czone.switch_change_ack()
-            self.czone.detailed_status()
-            self.startup_burst_remaining -= 1
-            if self.startup_burst_remaining > 0:
-                self.root.after(interval_ms, _send_once)
-
-        _send_once()
-
     def run(self):
         print("CZone emulator GUI running...")
-        self.start_startup_burst(repeats=3, interval_ms=150)
+        self.czone.address_claim()
+        self.czone.product_information()
         self.refresh_switch_states()
         self.poll_can()
         self.root.mainloop()
@@ -618,7 +590,6 @@ def main():
         czone.address_claim()
         czone.product_information()
         czone.heartbeat()
-        czone.switch_change_ack()
         czone.detailed_status()
         time.sleep(0.1)
 
