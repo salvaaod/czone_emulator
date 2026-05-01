@@ -49,7 +49,7 @@ N2K_SERIAL_ID = "J4616585-0068"
 BANK_ID = 0x02
 OUTPUT_COUNT = 6
 ADJUSTABLE_OUTPUT_COUNT = 4
-CURRENT_STEP_AMPS = 0.2
+CURRENT_STEP_AMPS = 0.1
 
 # ---------------- CAN STRUCTS ----------------
 
@@ -487,7 +487,7 @@ class CZoneGui:
                 row,
                 from_=0.0,
                 to=25.5,
-                increment=0.2,
+                increment=0.1,
                 format="%.1f",
                 textvariable=var,
                 width=6,
