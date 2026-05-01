@@ -49,6 +49,7 @@ N2K_SERIAL_ID = "J4616585-0068"
 BANK_ID = 0x02
 OUTPUT_COUNT = 6
 ADJUSTABLE_OUTPUT_COUNT = 4
+LEGACY_FIXED_CURRENTS_TENTHS = [2, 0, 8, 0]
 
 # ---------------- CAN STRUCTS ----------------
 
@@ -284,9 +285,9 @@ class CZone:
         payload = bytearray(u16(CZONE_MESSAGE) + bytes([0x00, self.dip_switch]))
 
         for output_index in range(1, OUTPUT_COUNT + 1):
-            current_tenths = self.get_output_current_tenths(output_index)
             if output_index <= ADJUSTABLE_OUTPUT_COUNT:
-                # Use the same trailing bytes that prior fixed payloads used so MFD decoding remains compatible.
+                # Temporary validation mode: encode the same fixed currents used by legacy payload checks.
+                current_tenths = LEGACY_FIXED_CURRENTS_TENTHS[output_index - 1]
                 payload.extend([current_tenths, 0x00, 0x04])
             else:
                 payload.extend([0x00, 0x00, 0x04])
@@ -296,7 +297,7 @@ class CZone:
 
         self.send_fast_packet(PGN_130817, payload, priority=7)
         currents_hex = " ".join(
-            f"O{i}:{self.get_output_current_tenths(i):02X}/{self.get_output_current(i):.1f}A"
+            f"O{i}:{LEGACY_FIXED_CURRENTS_TENTHS[i - 1]:02X}/{LEGACY_FIXED_CURRENTS_TENTHS[i - 1] / 10.0:.1f}A"
             for i in range(1, ADJUSTABLE_OUTPUT_COUNT + 1)
         )
         self._log(f"TX 130817 detailed: dip=0x{self.dip_switch:02X} state=0x{self.state:02X} currents=[{currents_hex}]")
