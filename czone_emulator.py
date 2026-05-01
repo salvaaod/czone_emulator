@@ -492,19 +492,23 @@ class CZoneGui:
             spin.bind("<FocusOut>", lambda _, idx=output_index: self.apply_output_current(idx))
             self.current_vars[output_index] = var
 
-        override_frame = tk.LabelFrame(self.root, text="Low-level O1/O2 bytes (hex: b0 b1 b2 b3)")
+        override_frame = tk.LabelFrame(self.root, text="Low-level O1/O2 bytes")
         override_frame.pack(pady=(0, 10), padx=8, fill="x")
         self.block_override_vars = {}
         for output_index in (1, 2):
             row = tk.Frame(override_frame)
             row.pack(fill="x", padx=6, pady=2)
             tk.Label(row, text=f"Output {output_index}", width=10, anchor="w").pack(side="left")
-            var = tk.StringVar(value="")
-            entry = tk.Entry(row, textvariable=var, width=16)
-            entry.pack(side="left", padx=(0, 6))
-            tk.Button(row, text="Apply", command=lambda idx=output_index: self.apply_block_override(idx)).pack(side="left", padx=(0, 4))
+            byte_vars = []
+            for byte_idx in range(4):
+                tk.Label(row, text=f"b{byte_idx}").pack(side="left")
+                var = tk.IntVar(value=0)
+                spin = tk.Spinbox(row, from_=0, to=255, textvariable=var, width=4)
+                spin.pack(side="left", padx=(2, 4))
+                byte_vars.append(var)
+            tk.Button(row, text="Apply", command=lambda idx=output_index: self.apply_block_override(idx)).pack(side="left", padx=(2, 4))
             tk.Button(row, text="Clear", command=lambda idx=output_index: self.clear_block_override(idx)).pack(side="left")
-            self.block_override_vars[output_index] = var
+            self.block_override_vars[output_index] = byte_vars
 
         self.status_label = tk.Label(self.root, text="Waiting for CAN messages...")
         self.status_label.pack(pady=(0, 10))
@@ -566,25 +570,24 @@ class CZoneGui:
         self.czone.detailed_status()
 
     def apply_block_override(self, output_index: int):
-        raw = self.block_override_vars[output_index].get().strip()
-        parts = raw.replace(",", " ").split()
-        if len(parts) != 4:
-            self.append_log(f"Output {output_index} override needs 4 hex bytes (example: 01 00 04 00).")
-            return
+        vars_for_output = self.block_override_vars[output_index]
         try:
-            values = [int(p, 16) for p in parts]
-        except ValueError:
-            self.append_log(f"Invalid hex bytes for output {output_index}: '{raw}'")
+            values = [max(0, min(255, int(var.get()))) for var in vars_for_output]
+        except (ValueError, tk.TclError):
+            self.append_log(f"Invalid byte value for output {output_index}; expected 0..255.")
             return
+
         self.czone.set_output_block_override(output_index, *values)
-        normalized = " ".join(f"{v:02X}" for v in self.czone.output_block_overrides[output_index])
-        self.block_override_vars[output_index].set(normalized)
+        for var, value in zip(vars_for_output, values):
+            var.set(value)
+        normalized = " ".join(f"{v:02X}" for v in values)
         self.append_log(f"Output {output_index} override -> {normalized}")
         self.czone.detailed_status()
 
     def clear_block_override(self, output_index: int):
         self.czone.clear_output_block_override(output_index)
-        self.block_override_vars[output_index].set("")
+        for var in self.block_override_vars[output_index]:
+            var.set(0)
         self.append_log(f"Output {output_index} override cleared")
         self.czone.detailed_status()
 
