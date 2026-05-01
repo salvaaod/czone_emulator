@@ -612,6 +612,16 @@ def main():
     dev.open()
 
     czone = CZone(dev)
+    # Push presence/status frames immediately after CAN open so reconnects do not
+    # wait for GUI initialization timing.
+    for _ in range(3):
+        czone.address_claim()
+        czone.product_information()
+        czone.heartbeat()
+        czone.switch_change_ack()
+        czone.detailed_status()
+        time.sleep(0.1)
+
     gui = CZoneGui(czone)
     gui.run()
 
