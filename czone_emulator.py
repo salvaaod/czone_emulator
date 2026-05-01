@@ -350,16 +350,14 @@ class CZone:
             return
 
         if data[5] != self.dip_switch:
-            if self.authenticated:
-                self._log(
-                    f"RX 65280 DIP auto-adjust: got {data[5]}, expected {self.dip_switch}; switching to received DIP"
-                )
-                self.dip_switch = data[5]
-            else:
-                self._log(
-                    f"RX 65280 ignored: DIP mismatch, got {data[5]}, expected {self.dip_switch}"
-                )
-                return
+            self._log(
+                f"RX 65280 DIP auto-adjust: got {data[5]}, expected {self.dip_switch}; switching to received DIP"
+            )
+            self.dip_switch = data[5]
+
+        if not self.authenticated:
+            self.authenticated = True
+            self._log("CZone authenticated (implicit via 65280 command)")
 
         sw = data[2]
         cmd = data[6]
