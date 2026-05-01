@@ -49,7 +49,7 @@ N2K_SERIAL_ID = "J4616585-0068"
 BANK_ID = 0x02
 OUTPUT_COUNT = 6
 ADJUSTABLE_OUTPUT_COUNT = 4
-LEGACY_FIXED_CURRENTS_TENTHS = [2, 0, 8, 0]
+CURRENT_STEP_AMPS = 0.2
 
 # ---------------- CAN STRUCTS ----------------
 
@@ -232,7 +232,7 @@ class CZone:
         self.output_current_tenths[output_index] = self._normalize_current_tenths(value)
 
     def set_output_current(self, output_index: int, amps: float):
-        quantized = int(round(float(amps) * 10.0))
+        quantized = int(round(float(amps) / CURRENT_STEP_AMPS))
         self.set_output_current_tenths(output_index, quantized)
 
     def get_output_current_tenths(self, output_index: int) -> int:
@@ -243,7 +243,7 @@ class CZone:
         return self.output_current_tenths.get(output_index, 0)
 
     def get_output_current(self, output_index: int) -> float:
-        return self.get_output_current_tenths(output_index) / 10.0
+        return self.get_output_current_tenths(output_index) * CURRENT_STEP_AMPS
 
     def set_output_block_override(self, output_index: int, b0: int, b1: int, b2: int, b3: int):
         if output_index not in (1, 2):
@@ -292,20 +292,26 @@ class CZone:
         self.send(PGN_65284, data)
 
     def detailed_status(self):
-        # Reverted to legacy PGN 130817 payload format used before current-model changes.
+        # Legacy PGN 130817 layout: header + six 4-byte output blocks = 28 bytes.
+        # Current mapping discovered from bench testing:
+        # O1 -> block1 b0, O2 -> block1 b3, O3 -> block2 b2, O4 -> block3 b1,
+        # then +3 byte stride for outputs 5 and 6.
         payload = bytearray(u16(CZONE_MESSAGE) + bytes([0x00, BANK_ID]))
-        for circuit in range(4):
-            output_index = circuit + 1
-            override = self.output_block_overrides.get(output_index)
-            if override is not None:
-                payload.extend(override)
-                continue
-            state = 0x01 if (self.state & (1 << circuit)) else 0x00
-            payload.extend([state, 0x00, 0x04, 0x00])
-        while len(payload) < 28:
-            payload.append(0xFF)
+        output_bytes = bytearray([0x00, 0x00, 0x04, 0x00] * OUTPUT_COUNT)
+
+        current_byte_positions = {1: 0, 2: 3, 3: 6, 4: 9, 5: 12, 6: 15}
+        for output_index, position in current_byte_positions.items():
+            current_byte = self.get_output_current_tenths(output_index)
+            if output_index > ADJUSTABLE_OUTPUT_COUNT:
+                current_byte = 0
+            output_bytes[position] = current_byte
+
+        payload.extend(output_bytes)
         self.send_fast_packet(PGN_130817, payload, priority=7)
-        self._log(f"TX 130817 detailed: bank=0x{BANK_ID:02X} state=0x{self.state:02X}")
+        self._log(
+            "TX 130817 detailed currents: "
+            + " ".join(f"O{i}={self.get_output_current(i):.1f}A" for i in range(1, ADJUSTABLE_OUTPUT_COUNT + 1))
+        )
 
     def address_claim(self):
         self.send(PGN_60928, encode_iso_name(), priority=6)
@@ -481,7 +487,7 @@ class CZoneGui:
                 row,
                 from_=0.0,
                 to=25.5,
-                increment=0.1,
+                increment=0.2,
                 format="%.1f",
                 textvariable=var,
                 width=6,
@@ -491,24 +497,6 @@ class CZoneGui:
             spin.bind("<Return>", lambda _, idx=output_index: self.apply_output_current(idx))
             spin.bind("<FocusOut>", lambda _, idx=output_index: self.apply_output_current(idx))
             self.current_vars[output_index] = var
-
-        override_frame = tk.LabelFrame(self.root, text="Low-level O1/O2 bytes")
-        override_frame.pack(pady=(0, 10), padx=8, fill="x")
-        self.block_override_vars = {}
-        for output_index in (1, 2):
-            row = tk.Frame(override_frame)
-            row.pack(fill="x", padx=6, pady=2)
-            tk.Label(row, text=f"Output {output_index}", width=10, anchor="w").pack(side="left")
-            byte_vars = []
-            for byte_idx in range(4):
-                tk.Label(row, text=f"b{byte_idx}").pack(side="left")
-                var = tk.IntVar(value=0)
-                spin = tk.Spinbox(row, from_=0, to=255, textvariable=var, width=4)
-                spin.pack(side="left", padx=(2, 4))
-                byte_vars.append(var)
-            tk.Button(row, text="Apply", command=lambda idx=output_index: self.apply_block_override(idx)).pack(side="left", padx=(2, 4))
-            tk.Button(row, text="Clear", command=lambda idx=output_index: self.clear_block_override(idx)).pack(side="left")
-            self.block_override_vars[output_index] = byte_vars
 
         self.status_label = tk.Label(self.root, text="Waiting for CAN messages...")
         self.status_label.pack(pady=(0, 10))
@@ -568,29 +556,6 @@ class CZoneGui:
         self.current_vars[output_index].set(f"{normalized:.1f}")
         self.append_log(f"Manual output {output_index} current -> {normalized:.1f} A")
         self.czone.detailed_status()
-
-    def apply_block_override(self, output_index: int):
-        vars_for_output = self.block_override_vars[output_index]
-        try:
-            values = [max(0, min(255, int(var.get()))) for var in vars_for_output]
-        except (ValueError, tk.TclError):
-            self.append_log(f"Invalid byte value for output {output_index}; expected 0..255.")
-            return
-
-        self.czone.set_output_block_override(output_index, *values)
-        for var, value in zip(vars_for_output, values):
-            var.set(value)
-        normalized = " ".join(f"{v:02X}" for v in values)
-        self.append_log(f"Output {output_index} override -> {normalized}")
-        self.czone.detailed_status()
-
-    def clear_block_override(self, output_index: int):
-        self.czone.clear_output_block_override(output_index)
-        for var in self.block_override_vars[output_index]:
-            var.set(0)
-        self.append_log(f"Output {output_index} override cleared")
-        self.czone.detailed_status()
-
     def record_switch_event(self, switch_code: int, is_on: bool):
         switch_id = (switch_code - 0x05) + 1
         state_text = "ON" if is_on else "OFF"
