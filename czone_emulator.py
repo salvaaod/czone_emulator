@@ -47,6 +47,8 @@ N2K_HARDWARE_ID = "A"
 N2K_SERIAL_ID = "J4616585-0068"
 
 BANK_ID = 0x02
+OUTPUT_COUNT = 6
+ADJUSTABLE_OUTPUT_COUNT = 4
 
 # ---------------- CAN STRUCTS ----------------
 
@@ -212,6 +214,34 @@ class CZone:
     def __post_init__(self):
         if self.pending_commands is None:
             self.pending_commands = {}
+        # Default currents for user-adjustable outputs 1-4 are 0.1 A (1 tenth).
+        # Outputs 5-6 are reserved and always encoded as 0.0 A for now.
+        self.output_current_tenths = {idx: (1 if idx <= ADJUSTABLE_OUTPUT_COUNT else 0) for idx in range(1, OUTPUT_COUNT + 1)}
+
+    def _normalize_current_tenths(self, value: int) -> int:
+        return max(0, min(255, int(value)))
+
+    def set_output_current_tenths(self, output_index: int, value: int):
+        if not (1 <= output_index <= OUTPUT_COUNT):
+            raise ValueError(f"Output index must be 1..{OUTPUT_COUNT}")
+        if output_index > ADJUSTABLE_OUTPUT_COUNT:
+            self.output_current_tenths[output_index] = 0
+            return
+        self.output_current_tenths[output_index] = self._normalize_current_tenths(value)
+
+    def set_output_current(self, output_index: int, amps: float):
+        quantized = int(round(float(amps) * 10.0))
+        self.set_output_current_tenths(output_index, quantized)
+
+    def get_output_current_tenths(self, output_index: int) -> int:
+        if not (1 <= output_index <= OUTPUT_COUNT):
+            raise ValueError(f"Output index must be 1..{OUTPUT_COUNT}")
+        if output_index > ADJUSTABLE_OUTPUT_COUNT:
+            return 0
+        return self.output_current_tenths.get(output_index, 0)
+
+    def get_output_current(self, output_index: int) -> float:
+        return self.get_output_current_tenths(output_index) / 10.0
 
     def send(self, pgn, data, priority=7):
         self.dev.send(n2k_id(priority, pgn, SRC), data)
@@ -251,14 +281,21 @@ class CZone:
         self.send(PGN_65284, data)
 
     def detailed_status(self):
-        payload = bytearray(u16(CZONE_MESSAGE) + bytes([0x00, BANK_ID]))
-        for circuit in range(4):
-            state = 0x01 if (self.state & (1 << circuit)) else 0x00
-            payload.extend([state, 0x00, 0x04, 0x00])
+        payload = bytearray(u16(CZONE_MESSAGE) + bytes([0x00, self.dip_switch]))
+
+        for output_index in range(1, OUTPUT_COUNT + 1):
+            current_tenths = self.get_output_current_tenths(output_index)
+            if output_index <= ADJUSTABLE_OUTPUT_COUNT:
+                payload.extend([current_tenths, 0xE8, 0x07])
+            else:
+                payload.extend([0x00, 0x00, 0x04])
+
         while len(payload) < 28:
             payload.append(0xFF)
+
         self.send_fast_packet(PGN_130817, payload, priority=7)
-        self._log(f"TX 130817 detailed: bank=0x{BANK_ID:02X} state=0x{self.state:02X}")
+        currents_hex = " ".join(f"O{i}:{self.get_output_current_tenths(i):02X}" for i in range(1, ADJUSTABLE_OUTPUT_COUNT + 1))
+        self._log(f"TX 130817 detailed: dip=0x{self.dip_switch:02X} state=0x{self.state:02X} currents=[{currents_hex}]")
 
     def address_claim(self):
         self.send(PGN_60928, encode_iso_name(), priority=6)
@@ -422,6 +459,29 @@ class CZoneGui:
             ).pack(side="left", padx=(0, 10))
             self.manual_vars.append(var)
 
+        current_frame = tk.LabelFrame(self.root, text="Output currents (A)")
+        current_frame.pack(pady=(0, 12), padx=8, fill="x")
+        self.current_vars = {}
+        for output_index in range(1, ADJUSTABLE_OUTPUT_COUNT + 1):
+            row = tk.Frame(current_frame)
+            row.pack(fill="x", padx=6, pady=2)
+            tk.Label(row, text=f"Output {output_index}", width=10, anchor="w").pack(side="left")
+            var = tk.StringVar(value=f"{self.czone.get_output_current(output_index):.1f}")
+            spin = tk.Spinbox(
+                row,
+                from_=0.0,
+                to=25.5,
+                increment=0.1,
+                format="%.1f",
+                textvariable=var,
+                width=6,
+                command=lambda idx=output_index: self.apply_output_current(idx),
+            )
+            spin.pack(side="left", padx=(0, 6))
+            spin.bind("<Return>", lambda _, idx=output_index: self.apply_output_current(idx))
+            spin.bind("<FocusOut>", lambda _, idx=output_index: self.apply_output_current(idx))
+            self.current_vars[output_index] = var
+
         self.status_label = tk.Label(self.root, text="Waiting for CAN messages...")
         self.status_label.pack(pady=(0, 10))
 
@@ -465,6 +525,21 @@ class CZoneGui:
         self.czone.heartbeat()
         self.czone.detailed_status()
         self.refresh_switch_states()
+
+    def apply_output_current(self, output_index: int):
+        raw = self.current_vars[output_index].get().strip()
+        try:
+            amps = float(raw)
+        except ValueError:
+            self.append_log(f"Invalid current '{raw}' for output {output_index}; keeping previous value.")
+            self.current_vars[output_index].set(f"{self.czone.get_output_current(output_index):.1f}")
+            return
+
+        self.czone.set_output_current(output_index, amps)
+        normalized = self.czone.get_output_current(output_index)
+        self.current_vars[output_index].set(f"{normalized:.1f}")
+        self.append_log(f"Manual output {output_index} current -> {normalized:.1f} A")
+        self.czone.detailed_status()
 
     def record_switch_event(self, switch_code: int, is_on: bool):
         switch_id = (switch_code - 0x05) + 1
