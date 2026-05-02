@@ -14,7 +14,7 @@ CAN_INDEX = 0
 TIMING0_250K = 0x01
 TIMING1_250K = 0x1C
 
-SRC = 2
+SRC = 20
 
 PGN_60928 = 60928
 PGN_59904 = 59904
@@ -25,7 +25,7 @@ PGN_126996 = 126996
 PGN_130817 = 130817
 
 CZONE_MESSAGE = 0x9927
-CZONE_DIP_SWITCH_DEFAULT = 1
+CZONE_UNIT_ID_DEFAULT = 2
 
 N2K_UNIQUE_NUMBER = 197135
 N2K_MANUFACTURER_CODE = 295
@@ -208,11 +208,12 @@ class CZone:
     state: int = 0
     authenticated: bool = True
     on_switch_event: Optional[Callable[[int, bool], None]] = None
-    dip_switch: int = CZONE_DIP_SWITCH_DEFAULT
+    unit_id: int = CZONE_UNIT_ID_DEFAULT
     pending_commands: dict[int, int] | None = None
 
     def __post_init__(self):
         self._log("CZone startup: pre-authenticated for immediate display sync")
+        self._log(f"Identity: NMEA2000 SRC={SRC}, CZone Unit ID={self.unit_id}")
         if self.pending_commands is None:
             self.pending_commands = {}
         # Default currents are 0.0 A for all outputs at startup.
@@ -349,9 +350,9 @@ class CZone:
             self._log("RX 65280 ignored: signature is not CZone message")
             return
 
-        if data[5] != self.dip_switch:
+        if data[5] != self.unit_id:
             self._log(
-                f"RX 65280 ignored: DIP mismatch, got {data[5]}, expected {self.dip_switch}"
+                f"RX 65280 ignored: CZone ID mismatch, got {data[5]}, expected {self.unit_id}"
             )
             return
 
@@ -396,9 +397,9 @@ class CZone:
         if int.from_bytes(data[:2], "little") != CZONE_MESSAGE:
             self._log("RX 65290 ignored: signature is not CZone message")
             return
-        if data[7] != self.dip_switch:
+        if data[7] != self.unit_id:
             self._log(
-                f"RX 65290 ignored: DIP mismatch, got {data[7]}, expected {self.dip_switch}"
+                f"RX 65290 ignored: CZone ID mismatch, got {data[7]}, expected {self.unit_id}"
             )
             return
         self._log("CZone authenticated")
@@ -449,7 +450,7 @@ class CZoneGui:
         )
         dip_frame = tk.Frame(self.root)
         dip_frame.pack(pady=(0, 6))
-        tk.Label(dip_frame, text=f"CZone DIP (fixed): {self.czone.dip_switch}").pack(side="left")
+        tk.Label(dip_frame, text=f"CZone Unit ID: {self.czone.unit_id}").pack(side="left")
 
         self.switches_label = tk.Label(self.root, text="Switch states: S1: OFF    S2: OFF    S3: OFF    S4: OFF")
         self.switches_label.pack(pady=(0, 14))
