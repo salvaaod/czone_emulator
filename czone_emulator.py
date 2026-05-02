@@ -25,7 +25,6 @@ PGN_126996 = 126996
 PGN_130817 = 130817
 
 CZONE_MESSAGE = 0x9927
-CZONE_DIP_SWITCH_DEFAULT = 2
 
 N2K_UNIQUE_NUMBER = 123456
 N2K_MANUFACTURER_CODE = 295
@@ -45,7 +44,7 @@ N2K_SOFTWARE_ID = "1.00"
 N2K_HARDWARE_ID = "A"
 N2K_SERIAL_ID = "J1234567-89AB"
 
-BANK_ID = 0x02
+CZONE_ID = 0x02
 OUTPUT_COUNT = 6
 ADJUSTABLE_OUTPUT_COUNT = 4
 CURRENT_STEP_AMPS = 0.1
@@ -212,13 +211,12 @@ class CZone:
     state: int = 0
     authenticated: bool = True
     on_switch_event: Optional[Callable[[int, bool], None]] = None
-    czone_dip_switch: int = CZONE_DIP_SWITCH_DEFAULT
     pending_commands: dict[int, int] | None = None
     keyboard_switch_maps: dict[int, dict[int, int]] | None = None
 
     def __post_init__(self):
         self._log("CZone startup: pre-authenticated for immediate display sync")
-        self._log(f"Identity: NMEA2000 SRC={SRC}, CZone DIP Switch={self.czone_dip_switch}")
+        self._log(f"Identity: NMEA2000 SRC={SRC}, CZone ID={CZONE_ID}")
         if self.pending_commands is None:
             self.pending_commands = {}
         if self.keyboard_switch_maps is None:
@@ -293,7 +291,7 @@ class CZone:
 
     def heartbeat(self):
         if self.authenticated:
-            data = u16(CZONE_MESSAGE) + bytes([BANK_ID, 0x0F, self.state, 0x00, 0x00, 0x00])
+            data = u16(CZONE_MESSAGE) + bytes([CZONE_ID, 0x0F, self.state, 0x00, 0x00, 0x00])
         else:
             data = u16(CZONE_MESSAGE) + bytes([0xFF]) + u16(0x0F0F) + u16(0) + bytes([0])
 
@@ -304,7 +302,7 @@ class CZone:
         # Current mapping discovered from bench testing:
         # O1 -> block1 b0, O2 -> block1 b3, O3 -> block2 b2, O4 -> block3 b1,
         # then +3 byte stride for outputs 5 and 6.
-        payload = bytearray(u16(CZONE_MESSAGE) + bytes([0x00, BANK_ID]))
+        payload = bytearray(u16(CZONE_MESSAGE) + bytes([0x00, CZONE_ID]))
         output_bytes = bytearray([0x00, 0x00, 0x04, 0x00] * OUTPUT_COUNT)
 
         current_byte_positions = {1: 0, 2: 3, 3: 6, 4: 9, 5: 12, 6: 15}
@@ -458,7 +456,7 @@ class CZoneGui:
         )
         dip_frame = tk.Frame(self.root)
         dip_frame.pack(pady=(0, 6))
-        tk.Label(dip_frame, text=f"CZone DIP Switch: {self.czone.czone_dip_switch}").pack(side="left")
+        tk.Label(dip_frame, text=f"CZone ID: {CZONE_ID}").pack(side="left")
         tk.Label(self.root, text=self._mapping_summary_text(), justify="left", anchor="w").pack(
             fill="x", padx=10, pady=(0, 6)
         )
