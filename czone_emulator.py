@@ -49,6 +49,10 @@ BANK_ID = 0x02
 OUTPUT_COUNT = 6
 ADJUSTABLE_OUTPUT_COUNT = 4
 CURRENT_STEP_AMPS = 0.1
+KEYBOARD_SWITCH_MAPS = {
+    2: {0x05: 1, 0x06: 2, 0x07: 3, 0x08: 4},
+    196: {0x05: 1, 0x06: 2, 0x07: 3, 0x08: 4},
+}
 
 # ---------------- CAN STRUCTS ----------------
 
@@ -210,12 +214,15 @@ class CZone:
     on_switch_event: Optional[Callable[[int, bool], None]] = None
     czone_dip_switch: int = CZONE_DIP_SWITCH_DEFAULT
     pending_commands: dict[int, int] | None = None
+    keyboard_switch_maps: dict[int, dict[int, int]] | None = None
 
     def __post_init__(self):
         self._log("CZone startup: pre-authenticated for immediate display sync")
         self._log(f"Identity: NMEA2000 SRC={SRC}, CZone DIP Switch={self.czone_dip_switch}")
         if self.pending_commands is None:
             self.pending_commands = {}
+        if self.keyboard_switch_maps is None:
+            self.keyboard_switch_maps = {k: dict(v) for k, v in KEYBOARD_SWITCH_MAPS.items()}
         # Default currents are 0.0 A for all outputs at startup.
         # Outputs 5-6 remain reserved and fixed at 0.0 A.
         self.output_current_tenths = {idx: 0 for idx in range(1, OUTPUT_COUNT + 1)}
@@ -339,6 +346,9 @@ class CZone:
         self.state = (self.state | mask) if is_on else (self.state & ~mask)
         return bool(self.state & mask)
 
+    def _set_output(self, output_index: int, is_on: bool) -> bool:
+        return self._set_switch(0x04 + output_index, is_on)
+
     def handle_command(self, _src: int, data: bytes):
         sender_czone_id = data[5] if len(data) > 5 else None
         sender_text = str(sender_czone_id) if sender_czone_id is not None else "unknown"
@@ -358,9 +368,13 @@ class CZone:
 
         sw = data[2]
         cmd = data[6]
+        keyboard_map = self.keyboard_switch_maps.get(sender_czone_id, {})
+        output_index = keyboard_map.get(sw)
 
-        if not (0x05 <= sw <= 0x08):
-            self._log(f"RX 65280 ignored: unsupported switch code 0x{sw:02X}")
+        if output_index is None:
+            self._log(
+                f"RX 65280 ignored: unmapped key 0x{sw:02X} from keyboard CZone ID {sender_text}"
+            )
             return
 
         if cmd in (0xF1, 0xF2):
@@ -371,16 +385,15 @@ class CZone:
         elif cmd in (0x40, 0x42):
             staged = self.pending_commands.get(sw)
             if staged in (0xF1, 0xF2):
-                is_on = self._set_switch(sw, staged == 0xF1)
+                is_on = self._set_output(output_index, staged == 0xF1)
                 self.pending_commands.pop(sw, None)
             else:
-                is_on = bool(self.state & (1 << (sw - 0x05)))
+                is_on = bool(self.state & (1 << (output_index - 1)))
             state_text = "ON" if is_on else "OFF"
-            switch_id = (sw - 0x05) + 1
-            message = f"Switch {switch_id} -> {state_text}"
+            message = f"Output {output_index} <- key 0x{sw:02X} -> {state_text}"
             self._log(message)
             if self.on_switch_event:
-                self.on_switch_event(sw, is_on)
+                self.on_switch_event(0x04 + output_index, is_on)
             self.heartbeat()
             self.detailed_status()
         else:
@@ -446,6 +459,7 @@ class CZoneGui:
         dip_frame = tk.Frame(self.root)
         dip_frame.pack(pady=(0, 6))
         tk.Label(dip_frame, text=f"CZone DIP Switch: {self.czone.czone_dip_switch}").pack(side="left")
+        tk.Label(dip_frame, text=self._mapping_summary_text()).pack(side="left", padx=(12, 0))
 
         self.switches_label = tk.Label(self.root, text="Switch states: S1: OFF    S2: OFF    S3: OFF    S4: OFF")
         self.switches_label.pack(pady=(0, 14))
@@ -537,6 +551,13 @@ class CZoneGui:
         state_text = "ON" if is_on else "OFF"
         self.append_log(f"Switch {switch_id} (code 0x{switch_code:02X}) -> {state_text}")
         self.refresh_switch_states()
+
+    def _mapping_summary_text(self) -> str:
+        segments = []
+        for keyboard_id, mapping in sorted(self.czone.keyboard_switch_maps.items()):
+            mapped = ", ".join(f"{k:02X}->{v}" for k, v in sorted(mapping.items()))
+            segments.append(f"KBD {keyboard_id}: {mapped}")
+        return "Mappings: " + " | ".join(segments)
 
     def poll_can(self):
         self.czone.process_rx()
