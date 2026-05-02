@@ -50,8 +50,8 @@ OUTPUT_COUNT = 6
 ADJUSTABLE_OUTPUT_COUNT = 4
 CURRENT_STEP_AMPS = 0.1
 KEYBOARD_SWITCH_MAPS = {
-    2: {0x05: 1, 0x06: 2, 0x07: 3, 0x08: 4},
-    196: {0x05: 1, 0x06: 2, 0x07: 3, 0x08: 4},
+    2:   {0x05: 1, 0x06: 2, 0x07: 3, 0x08: 4},
+    192: {0x09: 1, 0x0A: 2, 0x0B: 3, 0x0C: 4},
 }
 
 # ---------------- CAN STRUCTS ----------------
