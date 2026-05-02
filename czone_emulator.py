@@ -453,7 +453,7 @@ class CZoneGui:
         self.root.title("CZone Emulator")
         self.root.resizable(False, False)
 
-        tk.Label(self.root, text="Received CZone Switch Commands", font=("Arial", 12, "bold")).pack(
+        tk.Label(self.root, text="CZone OI Emulator", font=("Arial", 12, "bold")).pack(
             pady=(10, 4)
         )
         dip_frame = tk.Frame(self.root)
