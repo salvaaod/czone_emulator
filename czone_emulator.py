@@ -339,8 +339,8 @@ class CZone:
         self.state = (self.state | mask) if is_on else (self.state & ~mask)
         return bool(self.state & mask)
 
-    def handle_command(self, data):
-        self._log(f"RX 65280 raw: {data.hex(' ')}")
+    def handle_command(self, src: int, data: bytes):
+        self._log(f"RX 65280 from SA {src} raw: {data.hex(' ')}")
 
         if len(data) < 7:
             self._log("RX 65280 ignored: frame shorter than 7 bytes")
@@ -348,12 +348,6 @@ class CZone:
 
         if int.from_bytes(data[:2], "little") != CZONE_MESSAGE:
             self._log("RX 65280 ignored: signature is not CZone message")
-            return
-
-        if data[5] != self.czone_dip_switch:
-            self._log(
-                f"RX 65280 ignored: CZone ID mismatch, got {data[5]}, expected {self.czone_dip_switch}"
-            )
             return
 
         if not self.authenticated:
@@ -390,17 +384,14 @@ class CZone:
         else:
             self._log(f"RX 65280 ignored: unsupported command 0x{cmd:02X}")
 
-    def handle_config(self, data):
+    def handle_config(self, src: int, data: bytes):
+        self._log(f"RX 65290 from SA {src} raw: {data.hex(' ')}")
+
         if len(data) < 8:
             self._log("RX 65290 ignored: frame shorter than 8 bytes")
             return
         if int.from_bytes(data[:2], "little") != CZONE_MESSAGE:
             self._log("RX 65290 ignored: signature is not CZone message")
-            return
-        if data[7] != self.czone_dip_switch:
-            self._log(
-                f"RX 65290 ignored: CZone ID mismatch, got {data[7]}, expected {self.czone_dip_switch}"
-            )
             return
         self._log("CZone authenticated")
         self.authenticated = True
@@ -425,9 +416,9 @@ class CZone:
             src = parse_src(f.ID)
 
             if pgn == PGN_65280:
-                self.handle_command(data)
+                self.handle_command(src, data)
             elif pgn == PGN_65290:
-                self.handle_config(data)
+                self.handle_config(src, data)
             elif pgn == PGN_59904:
                 self.handle_request(src, data)
 
