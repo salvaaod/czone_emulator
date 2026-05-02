@@ -558,7 +558,7 @@ class CZoneGui:
         segments = []
         for keyboard_id, mapping in sorted(self.czone.keyboard_switch_maps.items()):
             mapped = ", ".join(f"{k:02X}->{v}" for k, v in sorted(mapping.items()))
-            segments.append(f"KBD {keyboard_id}: {mapped}")
+            segments.append(f"KBD {keyboard_id:03d}: {mapped}")
         return "Mappings:\n" + "\n".join(segments)
 
     def poll_can(self):
