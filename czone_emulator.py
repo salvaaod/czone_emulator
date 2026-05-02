@@ -316,6 +316,10 @@ class CZone:
 
         payload.extend(output_bytes)
         self.send_fast_packet(PGN_130817, payload, priority=7)
+        self._log(
+            "TX 130817 detailed currents: "
+            + " ".join(f"O{i}={self.get_output_current(i):.1f}A" for i in range(1, ADJUSTABLE_OUTPUT_COUNT + 1))
+        )
 
     def address_claim(self):
         self.send(PGN_60928, encode_iso_name(), priority=6)
