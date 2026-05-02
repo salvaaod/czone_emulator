@@ -339,8 +339,10 @@ class CZone:
         self.state = (self.state | mask) if is_on else (self.state & ~mask)
         return bool(self.state & mask)
 
-    def handle_command(self, src: int, data: bytes):
-        self._log(f"RX 65280 from SA {src} raw: {data.hex(' ')}")
+    def handle_command(self, _src: int, data: bytes):
+        sender_czone_id = data[5] if len(data) > 5 else None
+        sender_text = str(sender_czone_id) if sender_czone_id is not None else "unknown"
+        self._log(f"RX 65280 from CZone ID {sender_text} raw: {data.hex(' ')}")
 
         if len(data) < 7:
             self._log("RX 65280 ignored: frame shorter than 7 bytes")
@@ -384,8 +386,10 @@ class CZone:
         else:
             self._log(f"RX 65280 ignored: unsupported command 0x{cmd:02X}")
 
-    def handle_config(self, src: int, data: bytes):
-        self._log(f"RX 65290 from SA {src} raw: {data.hex(' ')}")
+    def handle_config(self, _src: int, data: bytes):
+        sender_czone_id = data[7] if len(data) > 7 else None
+        sender_text = str(sender_czone_id) if sender_czone_id is not None else "unknown"
+        self._log(f"RX 65290 from CZone ID {sender_text} raw: {data.hex(' ')}")
 
         if len(data) < 8:
             self._log("RX 65290 ignored: frame shorter than 8 bytes")
