@@ -459,7 +459,9 @@ class CZoneGui:
         dip_frame = tk.Frame(self.root)
         dip_frame.pack(pady=(0, 6))
         tk.Label(dip_frame, text=f"CZone DIP Switch: {self.czone.czone_dip_switch}").pack(side="left")
-        tk.Label(dip_frame, text=self._mapping_summary_text()).pack(side="left", padx=(12, 0))
+        tk.Label(self.root, text=self._mapping_summary_text(), justify="left", anchor="w").pack(
+            fill="x", padx=10, pady=(0, 6)
+        )
 
         self.switches_label = tk.Label(self.root, text="Switch states: S1: OFF    S2: OFF    S3: OFF    S4: OFF")
         self.switches_label.pack(pady=(0, 14))
@@ -557,7 +559,7 @@ class CZoneGui:
         for keyboard_id, mapping in sorted(self.czone.keyboard_switch_maps.items()):
             mapped = ", ".join(f"{k:02X}->{v}" for k, v in sorted(mapping.items()))
             segments.append(f"KBD {keyboard_id}: {mapped}")
-        return "Mappings: " + " | ".join(segments)
+        return "Mappings:\n" + "\n".join(segments)
 
     def poll_can(self):
         self.czone.process_rx()
