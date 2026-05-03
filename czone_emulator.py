@@ -576,7 +576,7 @@ class CZoneGui:
         self.modbus_enabled = True
         self.modbus_requests: Queue = Queue()
         self.modbus_events: Queue = Queue()
-        self.pending_modbus_actions: dict[int, tuple[bool, float]] = {}
+        self.pending_modbus_actions: dict[int, dict[str, float | bool | None]] = {}
         self._modbus_running = True
         self._modbus_thread = threading.Thread(target=self._modbus_worker, daemon=True)
         self._modbus_thread.start()
@@ -605,7 +605,7 @@ class CZoneGui:
     def _send_modbus_command(self, switch_id: int, is_on: bool):
         if not self.modbus_enabled:
             return
-        self.pending_modbus_actions[switch_id] = (is_on, time.time() + MODBUS_ACTION_TIMEOUT_SECONDS)
+        self.pending_modbus_actions[switch_id] = {"desired": is_on, "deadline": time.time() + MODBUS_ACTION_TIMEOUT_SECONDS, "last_polled": None}
         self.modbus_requests.put(("write", switch_id, is_on))
 
     def _modbus_worker(self):
@@ -653,11 +653,18 @@ class CZoneGui:
             if value is None:
                 continue
             is_on = value == 2
+            pending = self.pending_modbus_actions.get(switch_id)
+            if pending:
+                pending["last_polled"] = is_on
+                desired = bool(pending["desired"])
+                if is_on == desired:
+                    self.pending_modbus_actions.pop(switch_id, None)
+                else:
+                    # During pending window, keep virtual state at commanded value.
+                    continue
+
             before = bool(self.czone.state & (1 << (switch_id - 1)))
             after = self.czone._set_switch(0x04 + switch_id, is_on)
-            pending = self.pending_modbus_actions.get(switch_id)
-            if pending and pending[0] == after:
-                self.pending_modbus_actions.pop(switch_id, None)
             if after != before:
                 source_state = {1: "OPEN", 2: "CLOSED", 3: "TRIPPED/LOCKED"}.get(value, f"RAW={value}")
                 self.append_log(f"Modbus breaker {switch_id} status -> {source_state}")
@@ -666,13 +673,23 @@ class CZoneGui:
 
     def _check_modbus_timeouts(self):
         now = time.time()
-        expired = [sid for sid, (_, deadline) in self.pending_modbus_actions.items() if now > deadline]
+        expired = [sid for sid, info in self.pending_modbus_actions.items() if now > float(info["deadline"])]
         for switch_id in expired:
-            requested_state, _ = self.pending_modbus_actions.pop(switch_id)
-            reverted = self.czone._set_switch(0x04 + switch_id, not requested_state)
-            self.append_log(f"Modbus timeout on breaker {switch_id}; reverting to {'ON' if reverted else 'OFF'}")
-            self.czone.heartbeat()
-            self.czone.detailed_status()
+            info = self.pending_modbus_actions.pop(switch_id)
+            desired = bool(info["desired"])
+            last_polled = info.get("last_polled")
+
+            if desired:
+                final_state = False if last_polled is not True else True
+            else:
+                final_state = True if last_polled is True else False
+
+            before = bool(self.czone.state & (1 << (switch_id - 1)))
+            after = self.czone._set_switch(0x04 + switch_id, final_state)
+            if after != before:
+                self.append_log(f"Modbus timeout on breaker {switch_id}; final virtual state {'ON' if after else 'OFF'}")
+                self.czone.heartbeat()
+                self.czone.detailed_status()
 
     def apply_output_current(self, output_index: int):
         raw = self.current_vars[output_index].get().strip()
