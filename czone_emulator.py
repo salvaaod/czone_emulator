@@ -50,7 +50,6 @@ N2K_SOFTWARE_ID = "1.00"
 N2K_HARDWARE_ID = "A"
 N2K_SERIAL_ID = "J1234567-89AB"
 
-BANK_ID = 0x02
 OUTPUT_COUNT = 6
 ADJUSTABLE_OUTPUT_COUNT = 4
 CURRENT_STEP_AMPS = 0.1
@@ -230,6 +229,7 @@ class CZone:
     keyboard_switch_maps: dict[int, dict[int, int]] | None = None
 
     def __post_init__(self):
+        self.czone_dip_switch = self._normalize_byte(self.czone_dip_switch)
         self._log("CZone startup: pre-authenticated for immediate display sync")
         self._log(f"Identity: NMEA2000 SRC={SRC}, CZone DIP Switch={self.czone_dip_switch}")
         if self.pending_commands is None:
@@ -242,6 +242,10 @@ class CZone:
         self.output_block_overrides: dict[int, tuple[int, int, int, int]] = {}
 
     def _normalize_current_tenths(self, value: int) -> int:
+        return max(0, min(255, int(value)))
+
+    @staticmethod
+    def _normalize_byte(value: int) -> int:
         return max(0, min(255, int(value)))
 
     def set_output_current_tenths(self, output_index: int, value: int):
@@ -306,7 +310,7 @@ class CZone:
 
     def heartbeat(self):
         if self.authenticated:
-            data = u16(CZONE_MESSAGE) + bytes([BANK_ID, 0x0F, self.state, 0x00, 0x00, 0x00])
+            data = u16(CZONE_MESSAGE) + bytes([self.czone_dip_switch, 0x0F, self.state, 0x00, 0x00, 0x00])
         else:
             data = u16(CZONE_MESSAGE) + bytes([0xFF]) + u16(0x0F0F) + u16(0) + bytes([0])
 
@@ -317,7 +321,7 @@ class CZone:
         # Current mapping discovered from bench testing:
         # O1 -> block1 b0, O2 -> block1 b3, O3 -> block2 b2, O4 -> block3 b1,
         # then +3 byte stride for outputs 5 and 6.
-        payload = bytearray(u16(CZONE_MESSAGE) + bytes([0x00, BANK_ID]))
+        payload = bytearray(u16(CZONE_MESSAGE) + bytes([0x00, self.czone_dip_switch]))
         output_bytes = bytearray([0x00, 0x00, 0x04, 0x00] * OUTPUT_COUNT)
 
         current_byte_positions = {1: 0, 2: 3, 3: 6, 4: 9, 5: 12, 6: 15}
