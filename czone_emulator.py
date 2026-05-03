@@ -60,7 +60,7 @@ MODBUS_BAUDRATE = 9600
 MODBUS_POLL_INTERVAL_SECONDS = 0.1
 MODBUS_STATUS_REGISTER = 0x8000
 MODBUS_SWITCH_IDS = (1, 2, 3, 4)
-MODBUS_ACTION_TIMEOUT_SECONDS = 3.0
+MODBUS_ACTION_TIMEOUT_SECONDS = 5.0
 KEYBOARD_SWITCH_MAPS = {
     1:   {0x09: 1, 0x0A: 2, 0x0B: 3, 0x0C: 4},
     192: {0x09: 1, 0x0A: 2, 0x0B: 3, 0x0C: 4},
@@ -485,22 +485,36 @@ class ModbusBreakerBridge:
 
     def _send_frame(self, frame: bytes, response_size: int) -> bytes:
         self.connect()
+        # Drop any stale bytes so each request reads only its own response.
+        self.ser.reset_input_buffer()
         crc = self._crc16(frame)
         tx = frame + struct.pack("<H", crc)
         self.ser.write(tx)
+        self.ser.flush()
         return self.ser.read(response_size)
+
+    def _valid_crc(self, response: bytes) -> bool:
+        if len(response) < 4:
+            return False
+        payload = response[:-2]
+        received_crc = struct.unpack("<H", response[-2:])[0]
+        return self._crc16(payload) == received_crc
 
     def read_status(self, slave_id: int) -> Optional[int]:
         frame = bytes([slave_id, 0x03, (MODBUS_STATUS_REGISTER >> 8) & 0xFF, MODBUS_STATUS_REGISTER & 0xFF, 0x00, 0x01])
         response = self._send_frame(frame, response_size=7)
-        if len(response) < 7:
+        if len(response) < 7 or response[0] != slave_id or response[1] != 0x03 or response[2] != 0x02:
+            return None
+        if not self._valid_crc(response):
             return None
         return (response[3] << 8) | response[4]
 
     def write_command(self, slave_id: int, value: int) -> bool:
         frame = bytes([slave_id, 0x06, (MODBUS_STATUS_REGISTER >> 8) & 0xFF, MODBUS_STATUS_REGISTER & 0xFF, (value >> 8) & 0xFF, value & 0xFF])
         response = self._send_frame(frame, response_size=8)
-        return len(response) == 8
+        if len(response) < 8 or response[0] != slave_id or response[1] != 0x06:
+            return False
+        return self._valid_crc(response) and response[:6] == frame
 
     def close(self):
         if self.ser and self.ser.is_open:
