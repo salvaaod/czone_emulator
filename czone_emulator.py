@@ -1,12 +1,13 @@
 import ctypes
 import os
+import platform
 import struct
 import threading
 import time
 import tkinter as tk
 from queue import Empty, Queue
 from dataclasses import dataclass
-from typing import Callable, Optional
+from typing import Callable, Optional, Protocol
 
 import serial
 
@@ -98,6 +99,12 @@ class INIT_CONFIG(ctypes.Structure):
 # ---------------- GCAN DRIVER ----------------
 
 
+class CANTransport(Protocol):
+    def open(self): ...
+    def send(self, can_id, data: bytes): ...
+    def recv(self): ...
+
+
 class GCAN:
     def __init__(self, dll_path: str):
         dll_path = os.path.abspath(dll_path)
@@ -169,6 +176,94 @@ class GCAN:
         return buffer[:count]
 
 
+class SocketCANTransport:
+    def __init__(self, channel: str = "awlink0"):
+        try:
+            import can  # type: ignore
+        except ImportError as exc:
+            raise RuntimeError("python-can is required for SocketCAN backend") from exc
+        self._can = can
+        self.channel = channel
+        self.bus = None
+
+    def open(self):
+        self.bus = self._can.interface.Bus(channel=self.channel, interface="socketcan")
+        print(f"SocketCAN opened on interface: {self.channel}")
+
+    def send(self, can_id, data: bytes):
+        if self.bus is None:
+            raise RuntimeError("SocketCAN bus is not opened")
+        msg = self._can.Message(arbitration_id=can_id, data=data, is_extended_id=True)
+        self.bus.send(msg)
+
+    def recv(self):
+        if self.bus is None:
+            raise RuntimeError("SocketCAN bus is not opened")
+        frames = []
+        while True:
+            msg = self.bus.recv(timeout=0)
+            if msg is None:
+                break
+            obj = CAN_OBJ()
+            obj.ID = int(msg.arbitration_id)
+            obj.ExternFlag = 1 if msg.is_extended_id else 0
+            payload = bytes(msg.data)
+            obj.DataLen = len(payload)
+            for i, b in enumerate(payload[:8]):
+                obj.Data[i] = b
+            frames.append(obj)
+        return frames
+
+
+def resolve_serial_port(configured_port: str, current_os: str) -> str:
+    if current_os == "Windows":
+        return configured_port
+    if current_os != "Linux":
+        return configured_port
+
+    if configured_port.startswith("/dev/"):
+        return configured_port
+
+    default_linux_port = os.getenv("SERIAL_LINUX_DEFAULT_PORT", "/dev/ttyAS3")
+    alias_map = {
+        "COM8": default_linux_port,
+    }
+    env_alias = os.getenv("SERIAL_COM_ALIAS_MAP", "")
+    for entry in env_alias.split(","):
+        if "=" not in entry:
+            continue
+        alias, mapped = entry.split("=", 1)
+        alias_map[alias.strip().upper()] = mapped.strip()
+
+    key = configured_port.strip().upper()
+    return alias_map.get(key, configured_port)
+
+
+def select_can_transport(runtime_dir: str) -> tuple[object, dict[str, str]]:
+    current_os = platform.system()
+    backend = os.getenv("CAN_BACKEND", "").strip().lower()
+    channel = os.getenv("CAN_CHANNEL", "").strip()
+
+    if not backend:
+        backend = "gcan" if current_os == "Windows" else "socketcan" if current_os == "Linux" else "gcan"
+    if backend == "gcan":
+        dll_path = os.getenv("GCAN_DLL_PATH", os.path.join(runtime_dir, "ECanVci.dll"))
+        transport = GCAN(dll_path)
+        details = {"os": current_os, "backend": backend, "can_interface": channel or "n/a", "dll_path": dll_path}
+    elif backend == "socketcan":
+        resolved_channel = channel or "awlink0"
+        transport = SocketCANTransport(resolved_channel)
+        details = {"os": current_os, "backend": backend, "can_interface": resolved_channel, "dll_path": "n/a"}
+    else:
+        raise ValueError(f"Unsupported CAN backend '{backend}'")
+
+    print(
+        f"Startup CAN selection: os={details['os']}, backend={details['backend']}, "
+        f"interface={details['can_interface']}, dll={details['dll_path']}"
+    )
+    return transport, details
+
+
 # ---------------- NMEA2000 HELPERS ----------------
 
 
@@ -220,7 +315,7 @@ def encode_iso_name() -> bytes:
 
 @dataclass
 class CZone:
-    dev: GCAN
+    dev: CANTransport
     state: int = 0
     authenticated: bool = True
     on_switch_event: Optional[Callable[[int, bool], None]] = None
@@ -467,8 +562,9 @@ class CZone:
 
 
 class ModbusBreakerBridge:
-    def __init__(self, port: str = MODBUS_DEFAULT_COM_PORT):
+    def __init__(self, port: str = MODBUS_DEFAULT_COM_PORT, baudrate: int = MODBUS_BAUDRATE):
         self.port = port
+        self.baudrate = int(baudrate)
         self.ser: Optional[serial.Serial] = None
         self._bus_lock = threading.Lock()
         self._last_transaction_at = 0.0
@@ -476,7 +572,7 @@ class ModbusBreakerBridge:
     def connect(self):
         if self.ser and self.ser.is_open:
             return
-        self.ser = serial.Serial(self.port, MODBUS_BAUDRATE, timeout=0.2)
+        self.ser = serial.Serial(self.port, self.baudrate, timeout=0.2)
 
     @staticmethod
     def _crc16(data: bytes) -> int:
@@ -546,7 +642,7 @@ class ModbusBreakerBridge:
 
 
 class CZoneGui:
-    def __init__(self, czone: CZone):
+    def __init__(self, czone: CZone, modbus_port: str, modbus_baudrate: int):
         self.czone = czone
         self.root = tk.Tk()
         self.root.title("CZone Emulator")
@@ -610,7 +706,7 @@ class CZoneGui:
         self.last_heartbeat = now
         self.last_status = now
         self.last_n2k_identity = now - 60
-        self.modbus_bridge = ModbusBreakerBridge()
+        self.modbus_bridge = ModbusBreakerBridge(port=modbus_port, baudrate=modbus_baudrate)
         self.modbus_enabled = True
         self.modbus_requests: Queue = Queue()
         self.modbus_events: Queue = Queue()
@@ -799,12 +895,27 @@ class CZoneGui:
 
 def main():
     runtime_dir = os.path.dirname(os.path.abspath(__file__))
-    dll_path = os.path.join(runtime_dir, "ECanVci.dll")
+    transport, can_details = select_can_transport(runtime_dir)
+    current_os = can_details["os"]
+    configured_port = os.getenv("SERIAL_PORT", MODBUS_DEFAULT_COM_PORT)
+    resolved_port = resolve_serial_port(configured_port, current_os)
+    modbus_baudrate = int(os.getenv("SERIAL_BAUDRATE", str(MODBUS_BAUDRATE)))
 
-    dev = GCAN(dll_path)
-    dev.open()
+    try:
+        transport.open()
+    except Exception as exc:
+        raise RuntimeError(
+            f"CAN open failed (os={current_os}, backend={can_details['backend']}, "
+            f"interface={can_details['can_interface']}, serial_port={resolved_port}, "
+            f"baudrate={modbus_baudrate}): {exc}"
+        ) from exc
 
-    czone = CZone(dev)
+    print(
+        f"Startup serial selection: configured={configured_port}, resolved={resolved_port}, "
+        f"baudrate={modbus_baudrate}"
+    )
+
+    czone = CZone(transport)
     # Push presence/status frames immediately after CAN open so reconnects do not
     # wait for GUI initialization timing.
     for _ in range(3):
@@ -814,7 +925,7 @@ def main():
         czone.detailed_status()
         time.sleep(0.1)
 
-    gui = CZoneGui(czone)
+    gui = CZoneGui(czone, modbus_port=resolved_port, modbus_baudrate=modbus_baudrate)
     gui.run()
 
 
