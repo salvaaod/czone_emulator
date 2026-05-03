@@ -91,3 +91,22 @@ Requirements:
 
 - The `.ino` file is documentation/reference material and is **not** executed by the Python app.
 - If CAN traffic is present but switches do not change, verify sender CZone ID and key mapping first.
+
+## Modbus RTU 4-breaker controller example
+
+A separate example script `modbus_breaker_controller.py` is included for controlling 4 circuit breakers over Modbus RTU serial.
+
+Behavior:
+- Uses configurable COM port (`--port`), defaulting to `COM8`.
+- Maps switch 1..4 to Modbus slave addresses `1,2,3,4`.
+- Polls breaker status register `0x8000` every 500 ms.
+- Emits state changes when a remote trip/change is detected.
+- Sends open/close commands from CLI (or GUI integration hooks via `BreakerController` methods).
+
+CLI examples:
+
+```bash
+python modbus_breaker_controller.py monitor --port COM8
+python modbus_breaker_controller.py open --switch 1 --port COM8
+python modbus_breaker_controller.py close --switch 1 --port COM8
+```
