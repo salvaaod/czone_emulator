@@ -61,6 +61,7 @@ MODBUS_POLL_INTERVAL_SECONDS = 0.1
 MODBUS_STATUS_REGISTER = 0x8000
 MODBUS_SWITCH_IDS = (1, 2, 3, 4)
 MODBUS_ACTION_TIMEOUT_SECONDS = 3.0
+MODBUS_INTER_FRAME_GAP_SECONDS = 0.005
 KEYBOARD_SWITCH_MAPS = {
     1:   {0x09: 1, 0x0A: 2, 0x0B: 3, 0x0C: 4},
     192: {0x09: 1, 0x0A: 2, 0x0B: 3, 0x0C: 4},
@@ -465,6 +466,8 @@ class ModbusBreakerBridge:
     def __init__(self, port: str = MODBUS_DEFAULT_COM_PORT):
         self.port = port
         self.ser: Optional[serial.Serial] = None
+        self._bus_lock = threading.Lock()
+        self._last_transaction_at = 0.0
 
     def connect(self):
         if self.ser and self.ser.is_open:
@@ -484,14 +487,31 @@ class ModbusBreakerBridge:
         return crc
 
     def _send_frame(self, frame: bytes, response_size: int) -> bytes:
-        self.connect()
-        # Drop any stale bytes so each request reads only its own response.
-        self.ser.reset_input_buffer()
-        crc = self._crc16(frame)
-        tx = frame + struct.pack("<H", crc)
-        self.ser.write(tx)
-        self.ser.flush()
-        return self.ser.read(response_size)
+        with self._bus_lock:
+            self.connect()
+
+            # Modbus RTU requires request/response sequencing and an inter-frame silent interval.
+            elapsed = time.monotonic() - self._last_transaction_at
+            if elapsed < MODBUS_INTER_FRAME_GAP_SECONDS:
+                time.sleep(MODBUS_INTER_FRAME_GAP_SECONDS - elapsed)
+
+            # Drop stale bytes so each request reads only its own response.
+            self.ser.reset_input_buffer()
+
+            crc = self._crc16(frame)
+            tx = frame + struct.pack("<H", crc)
+            self.ser.write(tx)
+            self.ser.flush()
+
+            response = bytearray()
+            deadline = time.monotonic() + float(self.ser.timeout or 0.2)
+            while len(response) < response_size and time.monotonic() < deadline:
+                chunk = self.ser.read(response_size - len(response))
+                if chunk:
+                    response.extend(chunk)
+
+            self._last_transaction_at = time.monotonic()
+            return bytes(response)
 
     def _valid_crc(self, response: bytes) -> bool:
         if len(response) < 4:
