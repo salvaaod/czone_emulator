@@ -2,6 +2,7 @@ import ctypes
 import os
 import platform
 import struct
+import subprocess
 import threading
 import time
 import tkinter as tk
@@ -185,8 +186,34 @@ class SocketCANTransport:
         self._can = can
         self.channel = channel
         self.bus = None
+        self.auto_up = os.getenv("CAN_AUTO_UP", "1").strip().lower() not in {"0", "false", "no"}
+        self.bitrate = int(os.getenv("CAN_BITRATE", "250000"))
+
+    def _is_link_up(self) -> bool:
+        try:
+            result = subprocess.run(
+                ["ip", "link", "show", self.channel],
+                capture_output=True,
+                text=True,
+                check=True,
+            )
+        except Exception:
+            return False
+        return " state UP " in result.stdout or "<UP," in result.stdout
+
+    def _ensure_link_up(self):
+        if self._is_link_up():
+            return
+        if not self.auto_up:
+            raise RuntimeError(f"SocketCAN interface {self.channel} is DOWN and CAN_AUTO_UP is disabled")
+        print(f"SocketCAN interface {self.channel} is DOWN; attempting to bring it up at {self.bitrate} bps")
+        subprocess.run(["ip", "link", "set", self.channel, "up", "type", "can", "bitrate", str(self.bitrate)], check=True)
+        if not self._is_link_up():
+            raise RuntimeError(f"SocketCAN interface {self.channel} remains DOWN after bring-up attempt")
+        print(f"SocketCAN interface {self.channel} is now UP")
 
     def open(self):
+        self._ensure_link_up()
         self.bus = self._can.interface.Bus(channel=self.channel, interface="socketcan")
         print(f"SocketCAN opened on interface: {self.channel}")
 

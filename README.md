@@ -18,6 +18,9 @@ Selection order:
 Channel/interface selection:
 - `CAN_CHANNEL` override
 - Linux default: `awlink0`
+- Linux auto-bring-up controls:
+  - `CAN_AUTO_UP` (default `1`) attempts `ip link set <iface> up type can bitrate <CAN_BITRATE>` when link is DOWN
+  - `CAN_BITRATE` (default `250000`)
 
 GCAN DLL path:
 - `GCAN_DLL_PATH` override
@@ -72,6 +75,8 @@ python czone_emulator.py
 ```bash
 export CAN_BACKEND=socketcan
 export CAN_CHANNEL=awlink0
+export CAN_AUTO_UP=1
+export CAN_BITRATE=250000
 export SERIAL_PORT=/dev/ttyAS3
 export SERIAL_BAUDRATE=115200
 python czone_emulator.py
@@ -87,8 +92,9 @@ python czone_emulator.py
 
 ## Troubleshooting
 
-- **Missing CAN interface (`awlink0`) on Linux**
-  - Ensure SocketCAN interface exists and is up (for example via `ip link`).
+- **Missing/down CAN interface (`awlink0`) on Linux**
+  - By default the app attempts to bring the interface UP automatically using `CAN_BITRATE` (250000).
+  - If auto-up is disabled (`CAN_AUTO_UP=0`), ensure the interface exists and is up manually (for example via `ip link`).
   - Verify process privileges and CAN bitrate setup match your bus.
 - **Linux serial permission denied**
   - Confirm user access to `/dev/ttyAS3` (for example group membership such as `dialout`).
