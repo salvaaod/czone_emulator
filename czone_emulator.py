@@ -1,9 +1,12 @@
 import ctypes
 import os
+import struct
 import time
 import tkinter as tk
 from dataclasses import dataclass
 from typing import Callable, Optional
+
+import serial
 
 # ---------------- CONFIG ----------------
 
@@ -50,6 +53,11 @@ OUTPUT_COUNT = 6
 ADJUSTABLE_OUTPUT_COUNT = 4
 CURRENT_STEP_AMPS = 0.1
 LOG_TX_130817_DETAILED_CURRENTS = False
+MODBUS_DEFAULT_COM_PORT = "COM8"
+MODBUS_BAUDRATE = 9600
+MODBUS_POLL_INTERVAL_SECONDS = 0.5
+MODBUS_STATUS_REGISTER = 0x8000
+MODBUS_SWITCH_IDS = (1, 2, 3, 4)
 KEYBOARD_SWITCH_MAPS = {
     1:   {0x09: 1, 0x0A: 2, 0x0B: 3, 0x0C: 4},
     192: {0x09: 1, 0x0A: 2, 0x0B: 3, 0x0C: 4},
@@ -448,6 +456,61 @@ class CZone:
         self.detailed_status()
 
 
+
+
+class ModbusBreakerBridge:
+    def __init__(self, port: str = MODBUS_DEFAULT_COM_PORT):
+        self.port = port
+        self.ser = serial.Serial(self.port, MODBUS_BAUDRATE, timeout=0.2)
+
+    @staticmethod
+    def _crc16(data: bytes) -> int:
+        crc = 0xFFFF
+        for b in data:
+            crc ^= b
+            for _ in range(8):
+                if crc & 1:
+                    crc = (crc >> 1) ^ 0xA001
+                else:
+                    crc >>= 1
+        return crc
+
+    def _send_frame(self, frame: bytes, response_size: int) -> bytes:
+        crc = self._crc16(frame)
+        tx = frame + struct.pack("<H", crc)
+        self.ser.write(tx)
+        return self.ser.read(response_size)
+
+    def read_status(self, slave_id: int) -> Optional[int]:
+        frame = bytes([
+            slave_id,
+            0x03,
+            (MODBUS_STATUS_REGISTER >> 8) & 0xFF,
+            MODBUS_STATUS_REGISTER & 0xFF,
+            0x00,
+            0x01,
+        ])
+        response = self._send_frame(frame, response_size=7)
+        if len(response) < 7:
+            return None
+        return (response[3] << 8) | response[4]
+
+    def write_command(self, slave_id: int, value: int) -> bool:
+        frame = bytes([
+            slave_id,
+            0x06,
+            (MODBUS_STATUS_REGISTER >> 8) & 0xFF,
+            MODBUS_STATUS_REGISTER & 0xFF,
+            (value >> 8) & 0xFF,
+            value & 0xFF,
+        ])
+        response = self._send_frame(frame, response_size=8)
+        return len(response) == 8
+
+    def close(self):
+        if self.ser and self.ser.is_open:
+            self.ser.close()
+
 class CZoneGui:
     def __init__(self, czone: CZone):
         self.czone = czone
@@ -513,6 +576,13 @@ class CZoneGui:
         self.last_heartbeat = now
         self.last_status = now
         self.last_n2k_identity = now - 60
+        self.last_modbus_poll = 0.0
+        self.modbus_bridge: Optional[ModbusBreakerBridge] = None
+        try:
+            self.modbus_bridge = ModbusBreakerBridge()
+            self.append_log(f"Modbus bridge enabled on {self.modbus_bridge.port}")
+        except Exception as exc:
+            self.append_log(f"Modbus bridge disabled: {exc}")
 
     def append_log(self, message: str):
         print(message)
@@ -528,9 +598,37 @@ class CZoneGui:
         switch_code = 0x04 + switch_id
         updated = self.czone._set_switch(switch_code, is_on)
         self.append_log(f"Manual switch {switch_id} -> {'ON' if updated else 'OFF'}")
+        self._send_modbus_command(switch_id, updated)
         self.czone.heartbeat()
         self.czone.detailed_status()
         self.refresh_switch_states()
+
+
+
+    def _send_modbus_command(self, switch_id: int, is_on: bool):
+        if not self.modbus_bridge:
+            return
+        cmd_value = 2 if is_on else 1
+        ok = self.modbus_bridge.write_command(switch_id, cmd_value)
+        if not ok:
+            self.append_log(f"Modbus write failed for breaker {switch_id}")
+
+    def _poll_modbus_statuses(self):
+        if not self.modbus_bridge:
+            return
+        for switch_id in MODBUS_SWITCH_IDS:
+            value = self.modbus_bridge.read_status(switch_id)
+            if value is None:
+                continue
+            is_on = value == 2
+            switch_code = 0x04 + switch_id
+            before = bool(self.czone.state & (1 << (switch_id - 1)))
+            after = self.czone._set_switch(switch_code, is_on)
+            if after != before:
+                source_state = {1: "OPEN", 2: "CLOSED", 3: "TRIPPED/LOCKED"}.get(value, f"RAW={value}")
+                self.append_log(f"Modbus breaker {switch_id} status -> {source_state}")
+                self.czone.heartbeat()
+                self.czone.detailed_status()
 
     def apply_output_current(self, output_index: int):
         raw = self.current_vars[output_index].get().strip()
@@ -550,6 +648,7 @@ class CZoneGui:
         switch_id = (switch_code - 0x05) + 1
         state_text = "ON" if is_on else "OFF"
         self.append_log(f"Switch {switch_id} (code 0x{switch_code:02X}) -> {state_text}")
+        self._send_modbus_command(switch_id, is_on)
         self.refresh_switch_states()
 
     def _mapping_summary_text(self) -> str:
@@ -577,6 +676,10 @@ class CZoneGui:
             self.last_status = now
             self.czone.detailed_status()
 
+        if now - self.last_modbus_poll >= MODBUS_POLL_INTERVAL_SECONDS:
+            self.last_modbus_poll = now
+            self._poll_modbus_statuses()
+
         self.refresh_switch_states()
 
         self.root.after(50, self.poll_can)
@@ -588,6 +691,8 @@ class CZoneGui:
         self.refresh_switch_states()
         self.poll_can()
         self.root.mainloop()
+        if self.modbus_bridge:
+            self.modbus_bridge.close()
 
 
 # ---------------- MAIN ----------------
