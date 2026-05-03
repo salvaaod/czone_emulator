@@ -1,12 +1,15 @@
 import ctypes
+from errno import ENOBUFS
 import os
+import platform
 import struct
+import subprocess
 import threading
 import time
 import tkinter as tk
 from queue import Empty, Queue
 from dataclasses import dataclass
-from typing import Callable, Optional
+from typing import Callable, Optional, Protocol
 
 import serial
 
@@ -98,6 +101,13 @@ class INIT_CONFIG(ctypes.Structure):
 # ---------------- GCAN DRIVER ----------------
 
 
+class CANTransport(Protocol):
+    def open(self): ...
+    def send(self, can_id, data: bytes): ...
+    def recv(self): ...
+    def close(self): ...
+
+
 class GCAN:
     def __init__(self, dll_path: str):
         dll_path = os.path.abspath(dll_path)
@@ -168,6 +178,146 @@ class GCAN:
         count = self.dll.Receive(USBCAN_II, DEVICE_INDEX, CAN_INDEX, buffer, 50, 0)
         return buffer[:count]
 
+    def close(self):
+        return
+
+
+class SocketCANTransport:
+    def __init__(self, channel: str = "awlink0"):
+        try:
+            import can  # type: ignore
+        except ImportError as exc:
+            raise RuntimeError("python-can is required for SocketCAN backend") from exc
+        self._can = can
+        self.channel = channel
+        self.bus = None
+        self.auto_up = os.getenv("CAN_AUTO_UP", "1").strip().lower() not in {"0", "false", "no"}
+        self.bitrate = int(os.getenv("CAN_BITRATE", "250000"))
+        self.send_timeout_seconds = float(os.getenv("CAN_SEND_TIMEOUT_SECONDS", "0.2"))
+        self.send_retry_delay_seconds = float(os.getenv("CAN_SEND_RETRY_DELAY_SECONDS", "0.05"))
+
+    def _is_link_up(self) -> bool:
+        try:
+            result = subprocess.run(
+                ["ip", "link", "show", self.channel],
+                capture_output=True,
+                text=True,
+                check=True,
+            )
+        except Exception:
+            return False
+        return " state UP " in result.stdout or "<UP," in result.stdout
+
+    def _run_cmd(self, cmd: list[str], check: bool = True):
+        subprocess.run(cmd, check=check, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+
+    def _ensure_link_up(self):
+        if self._is_link_up():
+            return
+        if not self.auto_up:
+            raise RuntimeError(f"SocketCAN interface {self.channel} is DOWN and CAN_AUTO_UP is disabled")
+        print(f"SocketCAN interface {self.channel} is DOWN; resetting and bringing up at {self.bitrate} bps")
+        self._run_cmd(["ip", "link", "set", self.channel, "down"], check=False)
+        self._run_cmd(["ip", "link", "set", self.channel, "type", "can", "bitrate", str(self.bitrate)], check=False)
+        self._run_cmd(["ip", "link", "set", self.channel, "up"], check=True)
+        if not self._is_link_up():
+            raise RuntimeError(f"SocketCAN interface {self.channel} remains DOWN after bring-up attempt")
+        print(f"SocketCAN interface {self.channel} is now UP")
+
+    def open(self):
+        self._ensure_link_up()
+        self.bus = self._can.interface.Bus(channel=self.channel, interface="socketcan")
+        print(f"SocketCAN opened on interface: {self.channel}")
+
+    def send(self, can_id, data: bytes):
+        if self.bus is None:
+            raise RuntimeError("SocketCAN bus is not opened")
+        msg = self._can.Message(arbitration_id=can_id, data=data, is_extended_id=True)
+        while True:
+            try:
+                self.bus.send(msg, timeout=self.send_timeout_seconds)
+                return
+            except self._can.CanOperationError as exc:
+                error_code = getattr(exc, "error_code", None)
+                if error_code != ENOBUFS and "No buffer space available" not in str(exc):
+                    raise
+                time.sleep(self.send_retry_delay_seconds)
+
+    def recv(self):
+        if self.bus is None:
+            raise RuntimeError("SocketCAN bus is not opened")
+        frames = []
+        while True:
+            msg = self.bus.recv(timeout=0)
+            if msg is None:
+                break
+            obj = CAN_OBJ()
+            obj.ID = int(msg.arbitration_id)
+            obj.ExternFlag = 1 if msg.is_extended_id else 0
+            payload = bytes(msg.data)
+            obj.DataLen = len(payload)
+            for i, b in enumerate(payload[:8]):
+                obj.Data[i] = b
+            frames.append(obj)
+        return frames
+
+    def close(self):
+        if self.bus is not None:
+            try:
+                self.bus.shutdown()
+            except Exception:
+                pass
+            self.bus = None
+
+
+def resolve_serial_port(configured_port: str, current_os: str) -> str:
+    if current_os == "Windows":
+        return configured_port
+    if current_os != "Linux":
+        return configured_port
+
+    if configured_port.startswith("/dev/"):
+        return configured_port
+
+    default_linux_port = os.getenv("SERIAL_LINUX_DEFAULT_PORT", "/dev/ttyAS3")
+    alias_map = {
+        "COM8": default_linux_port,
+    }
+    env_alias = os.getenv("SERIAL_COM_ALIAS_MAP", "")
+    for entry in env_alias.split(","):
+        if "=" not in entry:
+            continue
+        alias, mapped = entry.split("=", 1)
+        alias_map[alias.strip().upper()] = mapped.strip()
+
+    key = configured_port.strip().upper()
+    return alias_map.get(key, configured_port)
+
+
+def select_can_transport(runtime_dir: str) -> tuple[object, dict[str, str]]:
+    current_os = platform.system()
+    backend = os.getenv("CAN_BACKEND", "").strip().lower()
+    channel = os.getenv("CAN_CHANNEL", "").strip()
+
+    if not backend:
+        backend = "gcan" if current_os == "Windows" else "socketcan" if current_os == "Linux" else "gcan"
+    if backend == "gcan":
+        dll_path = os.getenv("GCAN_DLL_PATH", os.path.join(runtime_dir, "ECanVci.dll"))
+        transport = GCAN(dll_path)
+        details = {"os": current_os, "backend": backend, "can_interface": channel or "n/a", "dll_path": dll_path}
+    elif backend == "socketcan":
+        resolved_channel = channel or "awlink0"
+        transport = SocketCANTransport(resolved_channel)
+        details = {"os": current_os, "backend": backend, "can_interface": resolved_channel, "dll_path": "n/a"}
+    else:
+        raise ValueError(f"Unsupported CAN backend '{backend}'")
+
+    print(
+        f"Startup CAN selection: os={details['os']}, backend={details['backend']}, "
+        f"interface={details['can_interface']}, dll={details['dll_path']}"
+    )
+    return transport, details
+
 
 # ---------------- NMEA2000 HELPERS ----------------
 
@@ -220,7 +370,7 @@ def encode_iso_name() -> bytes:
 
 @dataclass
 class CZone:
-    dev: GCAN
+    dev: CANTransport
     state: int = 0
     authenticated: bool = True
     on_switch_event: Optional[Callable[[int, bool], None]] = None
@@ -467,8 +617,9 @@ class CZone:
 
 
 class ModbusBreakerBridge:
-    def __init__(self, port: str = MODBUS_DEFAULT_COM_PORT):
+    def __init__(self, port: str = MODBUS_DEFAULT_COM_PORT, baudrate: int = MODBUS_BAUDRATE):
         self.port = port
+        self.baudrate = int(baudrate)
         self.ser: Optional[serial.Serial] = None
         self._bus_lock = threading.Lock()
         self._last_transaction_at = 0.0
@@ -476,7 +627,8 @@ class ModbusBreakerBridge:
     def connect(self):
         if self.ser and self.ser.is_open:
             return
-        self.ser = serial.Serial(self.port, MODBUS_BAUDRATE, timeout=0.2)
+        self.ser = serial.Serial(self.port, self.baudrate, timeout=0.2)
+        print(f"Modbus serial connected: port={self.port}, baudrate={self.baudrate}")
 
     @staticmethod
     def _crc16(data: bytes) -> int:
@@ -546,7 +698,7 @@ class ModbusBreakerBridge:
 
 
 class CZoneGui:
-    def __init__(self, czone: CZone):
+    def __init__(self, czone: CZone, modbus_port: str, modbus_baudrate: int):
         self.czone = czone
         self.root = tk.Tk()
         self.root.title("CZone Emulator")
@@ -610,7 +762,7 @@ class CZoneGui:
         self.last_heartbeat = now
         self.last_status = now
         self.last_n2k_identity = now - 60
-        self.modbus_bridge = ModbusBreakerBridge()
+        self.modbus_bridge = ModbusBreakerBridge(port=modbus_port, baudrate=modbus_baudrate)
         self.modbus_enabled = True
         self.modbus_requests: Queue = Queue()
         self.modbus_events: Queue = Queue()
@@ -794,28 +946,201 @@ class CZoneGui:
         self.modbus_bridge.close()
 
 
+class CZoneHeadless:
+    def __init__(self, czone: CZone, modbus_port: str, modbus_baudrate: int):
+        self.czone = czone
+        self.modbus_bridge = ModbusBreakerBridge(port=modbus_port, baudrate=modbus_baudrate)
+        self.modbus_enabled = True
+        self.modbus_requests: Queue = Queue()
+        self.modbus_events: Queue = Queue()
+        self.pending_modbus_actions: dict[int, dict[str, float | bool | None]] = {}
+        self._modbus_running = True
+        self._modbus_thread = threading.Thread(target=self._modbus_worker, daemon=True)
+        self._modbus_thread.start()
+        self.czone.on_switch_event = self.record_switch_event
+        self.last_heartbeat = time.time()
+        self.last_status = time.time()
+        self.last_n2k_identity = time.time() - 60
+
+    def _modbus_worker(self):
+        while self._modbus_running:
+            try:
+                req = self.modbus_requests.get(timeout=MODBUS_POLL_INTERVAL_SECONDS)
+            except Empty:
+                req = None
+
+            if req:
+                action, switch_id, is_on = req
+                if action == "write":
+                    try:
+                        ok = self.modbus_bridge.write_command(switch_id, 2 if is_on else 1)
+                    except Exception as exc:
+                        ok = False
+                        self.modbus_events.put(("error", f"Modbus write error breaker {switch_id}: {exc}"))
+                    self.modbus_events.put(("write_ack", switch_id, is_on, ok))
+
+            for switch_id in MODBUS_SWITCH_IDS:
+                try:
+                    value = self.modbus_bridge.read_status(switch_id)
+                except Exception as exc:
+                    self.modbus_events.put(("error", f"Modbus poll error: {exc}"))
+                    self.modbus_enabled = False
+                    return
+                self.modbus_events.put(("status", switch_id, value))
+            time.sleep(MODBUS_POLL_INTERVAL_SECONDS)
+
+    def _process_modbus_events(self):
+        while True:
+            try:
+                event = self.modbus_events.get_nowait()
+            except Empty:
+                break
+
+            kind = event[0]
+            if kind == "error":
+                print(event[1])
+                continue
+            if kind == "write_ack":
+                _, switch_id, is_on, ok = event
+                if not ok:
+                    print(f"Modbus write failed for breaker {switch_id}")
+                continue
+            _, switch_id, value = event
+            if value is None:
+                continue
+            is_on = value == 2
+            pending = self.pending_modbus_actions.get(switch_id)
+            if pending:
+                pending["last_polled"] = is_on
+                desired = bool(pending["desired"])
+                if is_on == desired:
+                    self.pending_modbus_actions.pop(switch_id, None)
+                else:
+                    continue
+
+            before = bool(self.czone.state & (1 << (switch_id - 1)))
+            after = self.czone._set_switch(0x04 + switch_id, is_on)
+            if after != before:
+                source_state = {1: "OPEN", 2: "CLOSED", 3: "TRIPPED/LOCKED"}.get(value, f"RAW={value}")
+                print(f"Modbus breaker {switch_id} status -> {source_state}")
+                self.czone.heartbeat()
+                self.czone.detailed_status()
+
+    def _check_modbus_timeouts(self):
+        now = time.time()
+        expired = [sid for sid, info in self.pending_modbus_actions.items() if now > float(info["deadline"])]
+        for switch_id in expired:
+            info = self.pending_modbus_actions.pop(switch_id)
+            desired = bool(info["desired"])
+            last_polled = info.get("last_polled")
+
+            if desired:
+                final_state = False if last_polled is not True else True
+            else:
+                final_state = True if last_polled is True else False
+
+            before = bool(self.czone.state & (1 << (switch_id - 1)))
+            after = self.czone._set_switch(0x04 + switch_id, final_state)
+            if after != before:
+                print(f"Modbus timeout on breaker {switch_id}; final virtual state {'ON' if after else 'OFF'}")
+                self.czone.heartbeat()
+                self.czone.detailed_status()
+
+    def _send_modbus_command(self, switch_id: int, is_on: bool):
+        if not self.modbus_enabled:
+            return
+        self.pending_modbus_actions[switch_id] = {"desired": is_on, "deadline": time.time() + MODBUS_ACTION_TIMEOUT_SECONDS, "last_polled": None}
+        self.modbus_requests.put(("write", switch_id, is_on))
+
+    def record_switch_event(self, switch_code: int, is_on: bool):
+        switch_id = (switch_code - 0x05) + 1
+        state_text = "ON" if is_on else "OFF"
+        print(f"Switch {switch_id} (code 0x{switch_code:02X}) -> {state_text}")
+        self._send_modbus_command(switch_id, is_on)
+
+    def run(self):
+        print("CZone emulator headless mode running...")
+        self.czone.address_claim()
+        self.czone.product_information()
+        while True:
+            self.czone.process_rx()
+            self._process_modbus_events()
+            self._check_modbus_timeouts()
+            now = time.time()
+            if now - self.last_heartbeat > 2:
+                self.last_heartbeat = now
+                self.czone.heartbeat()
+            if now - self.last_n2k_identity > 60:
+                self.last_n2k_identity = now
+                self.czone.address_claim()
+                self.czone.product_information()
+            if now - self.last_status > 2:
+                self.last_status = now
+                self.czone.detailed_status()
+            time.sleep(0.05)
+
+    def close(self):
+        self._modbus_running = False
+        if hasattr(self, "_modbus_thread"):
+            self._modbus_thread.join(timeout=0.5)
+        self.modbus_bridge.close()
+
+
 # ---------------- MAIN ----------------
 
 
 def main():
     runtime_dir = os.path.dirname(os.path.abspath(__file__))
-    dll_path = os.path.join(runtime_dir, "ECanVci.dll")
+    transport, can_details = select_can_transport(runtime_dir)
+    current_os = can_details["os"]
+    configured_port = os.getenv("SERIAL_PORT", MODBUS_DEFAULT_COM_PORT)
+    resolved_port = resolve_serial_port(configured_port, current_os)
+    modbus_baudrate = int(os.getenv("SERIAL_BAUDRATE", str(MODBUS_BAUDRATE)))
 
-    dev = GCAN(dll_path)
-    dev.open()
+    try:
+        transport.open()
+    except Exception as exc:
+        raise RuntimeError(
+            f"CAN open failed (os={current_os}, backend={can_details['backend']}, "
+            f"interface={can_details['can_interface']}, serial_port={resolved_port}, "
+            f"baudrate={modbus_baudrate}): {exc}"
+        ) from exc
 
-    czone = CZone(dev)
-    # Push presence/status frames immediately after CAN open so reconnects do not
-    # wait for GUI initialization timing.
-    for _ in range(3):
-        czone.address_claim()
-        czone.product_information()
-        czone.heartbeat()
-        czone.detailed_status()
-        time.sleep(0.1)
+    print(
+        f"Startup serial selection: configured={configured_port}, resolved={resolved_port}, "
+        f"baudrate={modbus_baudrate}"
+    )
 
-    gui = CZoneGui(czone)
-    gui.run()
+    try:
+        czone = CZone(transport)
+        # Push presence/status frames immediately after CAN open so reconnects do not
+        # wait for GUI initialization timing.
+        for _ in range(3):
+            czone.address_claim()
+            czone.product_information()
+            czone.heartbeat()
+            czone.detailed_status()
+            time.sleep(0.1)
+
+        headless = os.getenv("HEADLESS", "").strip().lower() in {"1", "true", "yes"}
+        if platform.system() == "Linux" and not os.getenv("DISPLAY"):
+            headless = True
+        print(f"Startup UI mode: {'headless' if headless else 'gui'}")
+
+        if headless:
+            app = CZoneHeadless(czone, modbus_port=resolved_port, modbus_baudrate=modbus_baudrate)
+        else:
+            app = CZoneGui(czone, modbus_port=resolved_port, modbus_baudrate=modbus_baudrate)
+        try:
+            app.run()
+        finally:
+            if hasattr(app, "close"):
+                app.close()
+    finally:
+        try:
+            transport.close()
+        except Exception:
+            pass
 
 
 if __name__ == "__main__":

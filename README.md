@@ -1,93 +1,114 @@
 # CZone Emulator
 
-This repository provides a **Windows desktop CZone switch emulator** for lab/bench testing NMEA 2000 integrations without dedicated CZone hardware.
+This repository provides a cross-platform CZone switch emulator for lab/bench testing NMEA 2000 integrations without dedicated CZone hardware.
 
-## Intended usage
+## Runtime architecture
 
-Use this project when you want to:
-- validate MFD/keypad behavior against a simulated CZone output interface,
-- test message sequencing (stage/commit switch commands) on a live CAN bus,
-- verify discovery/identity traffic (address claim + product information),
-- manually force switch states and output-current bytes while observing downstream device behavior.
+`czone_emulator.py` now selects CAN and serial transport at startup while keeping the same CZone protocol and Tkinter behavior.
 
-This is a **development/diagnostic emulator**, not a certified marine controller.
+- **Windows default:** GCAN backend (`ECanVci.dll`) + COM-style RS485 port.
+- **Linux default:** SocketCAN backend on `awlink0` + RS485 `/dev/ttyAS3` at `115200`.
 
-## Repository contents
+## CAN backend selection
 
-- `czone_emulator.py`  
-  Main Python app (CAN transport + CZone protocol handling + Tkinter GUI).
+Selection order:
+1. `CAN_BACKEND` override (`gcan` or `socketcan`)
+2. OS detection (`platform.system()`)
 
-- `ECanVci.dll`  
-  Required USB-CAN driver library loaded via `ctypes.WinDLL`.
+Channel/interface selection:
+- `CAN_CHANNEL` override
+- Linux default: `awlink0`
+- Linux auto-bring-up controls:
+  - `CAN_AUTO_UP` (default `1`) attempts `ip link set <iface> up type can bitrate <CAN_BITRATE>` when link is DOWN
+  - `CAN_BITRATE` (default `250000`)
+  - `CAN_SEND_TIMEOUT_SECONDS` (default `0.2`)
+  - `CAN_SEND_RETRY_DELAY_SECONDS` (default `0.05`) retries ENOBUFS (`No buffer space available`) send errors
 
-- `CzRaymarineMFDSwitches.ino`  
-  Reference Arduino sketch kept as protocol inspiration for eventual hardware implementation.
+GCAN DLL path:
+- `GCAN_DLL_PATH` override
+- default: `ECanVci.dll` beside `czone_emulator.py`
 
-## Code behavior (runtime)
+Expected startup log example:
 
-At startup the emulator:
-1. Opens the USB-CAN adapter at **250 kbps**.
-2. Claims a NMEA 2000 address (PGN **60928**) and sends product info (PGN **126996**).
-3. Sends immediate heartbeat/status bursts so reconnecting displays can resync quickly.
+```text
+Startup CAN selection: os=Linux, backend=socketcan, interface=awlink0, dll=n/a
+```
 
-While running, it:
-- listens for PGN **65280** command frames and applies a **stage/commit** model:
-  - `0xF1` / `0xF2` stage desired ON/OFF,
-  - `0x40` / `0x42` commits the staged state for that key.
-- listens for PGN **65290** configuration/authentication frames and marks the emulator authenticated,
-- listens for PGN **59904** requests and responds to:
-  - PGN 60928 requests with address claim,
-  - PGN 126996 requests with product information.
+## RS485 serial resolution
 
-It transmits periodic updates:
-- PGN **65284** heartbeat,
-- PGN **130817** detailed status (fast-packet) with six output blocks,
-- recurring identity traffic (60928 + 126996).
+Serial selection supports COM compatibility on Linux:
 
-## Switch and keyboard mapping
+- **Windows:** `COMx` values are used unchanged.
+- **Linux:**
+  - native `/dev/...` paths are used directly,
+  - COM-style values are mapped via aliasing.
 
-The emulator tracks **4 logical switches** (S1..S4) mapped from keypad command bytes by sender CZone ID:
+Defaults and overrides:
+- `SERIAL_PORT` (default `COM8`)
+- `SERIAL_BAUDRATE` (default `115200`)
+  - Linux headless mode uses this same baudrate for RS485 polling/transmission via Modbus.
+- `SERIAL_LINUX_DEFAULT_PORT` (default `/dev/ttyAS3`)
+- `SERIAL_COM_ALIAS_MAP` (comma-separated mapping, example `COM8=/dev/ttyAS3,COM9=/dev/ttyUSB0`)
 
-- Keyboard ID `2`: `0x05->S1`, `0x06->S2`, `0x07->S3`, `0x08->S4`
-- Keyboard ID `192`: `0x09->S1`, `0x0A->S2`, `0x0B->S3`, `0x0C->S4`
+Expected startup log example:
 
-Unmapped keys are ignored and logged.
+```text
+Startup serial selection: configured=COM8, resolved=/dev/ttyAS3, baudrate=115200
+Modbus serial connected: port=/dev/ttyAS3, baudrate=115200
+```
 
-## Output current behavior
+## Startup examples
 
-- 6 outputs are encoded into PGN 130817 status blocks.
-- Outputs **1..4** are user-adjustable in the GUI (0.0 to 25.5 A in 0.1 A steps).
-- Outputs **5..6** are reserved and always reported as `0.0 A`.
-
-## GUI behavior
-
-The Tkinter UI provides:
-- live switch state display (S1..S4),
-- manual switch toggles,
-- manual current setpoints for outputs 1..4,
-- console logging of RX/TX protocol events.
-
-Background loop timing:
-- CAN polling every ~50 ms,
-- heartbeat every ~2 s,
-- detailed status every ~2 s,
-- identity re-announce every ~60 s.
-
-## Running the emulator
-
-From this directory:
+### Windows (GCAN + COM)
 
 ```bash
 python czone_emulator.py
 ```
 
-Requirements:
-- Windows-compatible Python runtime (`ctypes.WinDLL` support),
-- `ECanVci.dll` present beside `czone_emulator.py`,
-- supported USB-CAN hardware connected,
-- bus configured for 250 kbps.
+Optional explicit override:
 
-## Notes
+```bash
+set CAN_BACKEND=gcan
+set SERIAL_PORT=COM8
+set SERIAL_BAUDRATE=115200
+python czone_emulator.py
+```
 
-- The `.ino` file is documentation/reference material and is **not** executed by the Python app.
-- If CAN traffic is present but switches do not change, verify sender CZone ID and key mapping first.
+### Linux (SocketCAN + awlink0 + /dev/ttyAS3, headless default without DISPLAY)
+
+```bash
+export CAN_BACKEND=socketcan
+export CAN_CHANNEL=awlink0
+export CAN_AUTO_UP=1
+export CAN_BITRATE=250000
+export SERIAL_PORT=/dev/ttyAS3
+export SERIAL_BAUDRATE=115200
+# optional explicit headless override
+export HEADLESS=1
+python czone_emulator.py
+```
+
+Linux COM-alias example:
+
+```bash
+export SERIAL_PORT=COM8
+export SERIAL_COM_ALIAS_MAP='COM8=/dev/ttyAS3'
+python czone_emulator.py
+```
+
+## Troubleshooting
+
+- **Missing/down CAN interface (`awlink0`) on Linux**
+  - By default the app attempts to bring the interface UP automatically using `CAN_BITRATE` (250000).
+  - If auto-up is disabled (`CAN_AUTO_UP=0`), ensure the interface exists and is up manually (for example via `ip link`).
+  - Verify process privileges and CAN bitrate setup match your bus.
+  - If no CAN peer is acknowledging frames, SocketCAN may raise ENOBUFS; the app now retries with a short backoff.
+- **No GUI display on Linux (`no $DISPLAY`)**
+  - The emulator now auto-switches to headless mode on Linux when `DISPLAY` is unset.
+  - Force behavior with `HEADLESS=1` (headless) or set `DISPLAY` for GUI mode.
+- **Linux serial permission denied**
+  - Confirm user access to `/dev/ttyAS3` (for example group membership such as `dialout`).
+- **COM alias mismatch on Linux**
+  - If `SERIAL_PORT` is COM-style, verify `SERIAL_COM_ALIAS_MAP` points to the intended `/dev/...` device.
+- **Startup failure diagnostics**
+  - The emulator now reports OS, backend, CAN interface, serial port, and baudrate in failure messages to speed field debugging.
