@@ -1,8 +1,10 @@
 import ctypes
 import os
 import struct
+import threading
 import time
 import tkinter as tk
+from queue import Empty, Queue
 from dataclasses import dataclass
 from typing import Callable, Optional
 
@@ -58,6 +60,7 @@ MODBUS_BAUDRATE = 9600
 MODBUS_POLL_INTERVAL_SECONDS = 0.1
 MODBUS_STATUS_REGISTER = 0x8000
 MODBUS_SWITCH_IDS = (1, 2, 3, 4)
+MODBUS_ACTION_TIMEOUT_SECONDS = 1.0
 KEYBOARD_SWITCH_MAPS = {
     1:   {0x09: 1, 0x0A: 2, 0x0B: 3, 0x0C: 4},
     192: {0x09: 1, 0x0A: 2, 0x0B: 3, 0x0C: 4},
@@ -461,6 +464,11 @@ class CZone:
 class ModbusBreakerBridge:
     def __init__(self, port: str = MODBUS_DEFAULT_COM_PORT):
         self.port = port
+        self.ser: Optional[serial.Serial] = None
+
+    def connect(self):
+        if self.ser and self.ser.is_open:
+            return
         self.ser = serial.Serial(self.port, MODBUS_BAUDRATE, timeout=0.2)
 
     @staticmethod
@@ -476,40 +484,28 @@ class ModbusBreakerBridge:
         return crc
 
     def _send_frame(self, frame: bytes, response_size: int) -> bytes:
+        self.connect()
         crc = self._crc16(frame)
         tx = frame + struct.pack("<H", crc)
         self.ser.write(tx)
         return self.ser.read(response_size)
 
     def read_status(self, slave_id: int) -> Optional[int]:
-        frame = bytes([
-            slave_id,
-            0x03,
-            (MODBUS_STATUS_REGISTER >> 8) & 0xFF,
-            MODBUS_STATUS_REGISTER & 0xFF,
-            0x00,
-            0x01,
-        ])
+        frame = bytes([slave_id, 0x03, (MODBUS_STATUS_REGISTER >> 8) & 0xFF, MODBUS_STATUS_REGISTER & 0xFF, 0x00, 0x01])
         response = self._send_frame(frame, response_size=7)
         if len(response) < 7:
             return None
         return (response[3] << 8) | response[4]
 
     def write_command(self, slave_id: int, value: int) -> bool:
-        frame = bytes([
-            slave_id,
-            0x06,
-            (MODBUS_STATUS_REGISTER >> 8) & 0xFF,
-            MODBUS_STATUS_REGISTER & 0xFF,
-            (value >> 8) & 0xFF,
-            value & 0xFF,
-        ])
+        frame = bytes([slave_id, 0x06, (MODBUS_STATUS_REGISTER >> 8) & 0xFF, MODBUS_STATUS_REGISTER & 0xFF, (value >> 8) & 0xFF, value & 0xFF])
         response = self._send_frame(frame, response_size=8)
         return len(response) == 8
 
     def close(self):
         if self.ser and self.ser.is_open:
             self.ser.close()
+
 
 class CZoneGui:
     def __init__(self, czone: CZone):
@@ -576,13 +572,14 @@ class CZoneGui:
         self.last_heartbeat = now
         self.last_status = now
         self.last_n2k_identity = now - 60
-        self.last_modbus_poll = 0.0
-        self.modbus_bridge: Optional[ModbusBreakerBridge] = None
-        try:
-            self.modbus_bridge = ModbusBreakerBridge()
-            self.append_log(f"Modbus bridge enabled on {self.modbus_bridge.port}")
-        except Exception as exc:
-            self.append_log(f"Modbus bridge disabled: {exc}")
+        self.modbus_bridge = ModbusBreakerBridge()
+        self.modbus_enabled = True
+        self.modbus_requests: Queue = Queue()
+        self.modbus_events: Queue = Queue()
+        self.pending_modbus_actions: dict[int, tuple[bool, float]] = {}
+        self._modbus_running = True
+        self._modbus_thread = threading.Thread(target=self._modbus_worker, daemon=True)
+        self._modbus_thread.start()
 
     def append_log(self, message: str):
         print(message)
@@ -606,29 +603,76 @@ class CZoneGui:
 
 
     def _send_modbus_command(self, switch_id: int, is_on: bool):
-        if not self.modbus_bridge:
+        if not self.modbus_enabled:
             return
-        cmd_value = 2 if is_on else 1
-        ok = self.modbus_bridge.write_command(switch_id, cmd_value)
-        if not ok:
-            self.append_log(f"Modbus write failed for breaker {switch_id}")
+        self.pending_modbus_actions[switch_id] = (is_on, time.time() + MODBUS_ACTION_TIMEOUT_SECONDS)
+        self.modbus_requests.put(("write", switch_id, is_on))
 
-    def _poll_modbus_statuses(self):
-        if not self.modbus_bridge:
-            return
-        for switch_id in MODBUS_SWITCH_IDS:
-            value = self.modbus_bridge.read_status(switch_id)
+    def _modbus_worker(self):
+        while self._modbus_running:
+            try:
+                req = self.modbus_requests.get(timeout=MODBUS_POLL_INTERVAL_SECONDS)
+            except Empty:
+                req = None
+
+            if req:
+                action, switch_id, is_on = req
+                if action == "write":
+                    try:
+                        ok = self.modbus_bridge.write_command(switch_id, 2 if is_on else 1)
+                    except Exception as exc:
+                        ok = False
+                        self.modbus_events.put(("error", f"Modbus write error breaker {switch_id}: {exc}"))
+                    self.modbus_events.put(("write_ack", switch_id, is_on, ok))
+
+            for switch_id in MODBUS_SWITCH_IDS:
+                try:
+                    value = self.modbus_bridge.read_status(switch_id)
+                except Exception as exc:
+                    self.modbus_events.put(("error", f"Modbus poll error: {exc}"))
+                    self.modbus_enabled = False
+                    return
+                self.modbus_events.put(("status", switch_id, value))
+
+    def _process_modbus_events(self):
+        while True:
+            try:
+                event = self.modbus_events.get_nowait()
+            except Empty:
+                break
+            kind = event[0]
+            if kind == "error":
+                self.append_log(event[1])
+                continue
+            if kind == "write_ack":
+                _, switch_id, is_on, ok = event
+                if not ok:
+                    self.append_log(f"Modbus write failed for breaker {switch_id}")
+                continue
+            _, switch_id, value = event
             if value is None:
                 continue
             is_on = value == 2
-            switch_code = 0x04 + switch_id
             before = bool(self.czone.state & (1 << (switch_id - 1)))
-            after = self.czone._set_switch(switch_code, is_on)
+            after = self.czone._set_switch(0x04 + switch_id, is_on)
+            pending = self.pending_modbus_actions.get(switch_id)
+            if pending and pending[0] == after:
+                self.pending_modbus_actions.pop(switch_id, None)
             if after != before:
                 source_state = {1: "OPEN", 2: "CLOSED", 3: "TRIPPED/LOCKED"}.get(value, f"RAW={value}")
                 self.append_log(f"Modbus breaker {switch_id} status -> {source_state}")
                 self.czone.heartbeat()
                 self.czone.detailed_status()
+
+    def _check_modbus_timeouts(self):
+        now = time.time()
+        expired = [sid for sid, (_, deadline) in self.pending_modbus_actions.items() if now > deadline]
+        for switch_id in expired:
+            requested_state, _ = self.pending_modbus_actions.pop(switch_id)
+            reverted = self.czone._set_switch(0x04 + switch_id, not requested_state)
+            self.append_log(f"Modbus timeout on breaker {switch_id}; reverting to {'ON' if reverted else 'OFF'}")
+            self.czone.heartbeat()
+            self.czone.detailed_status()
 
     def apply_output_current(self, output_index: int):
         raw = self.current_vars[output_index].get().strip()
@@ -676,10 +720,8 @@ class CZoneGui:
             self.last_status = now
             self.czone.detailed_status()
 
-        if now - self.last_modbus_poll >= MODBUS_POLL_INTERVAL_SECONDS:
-            self.last_modbus_poll = now
-            self._poll_modbus_statuses()
-
+        self._process_modbus_events()
+        self._check_modbus_timeouts()
         self.refresh_switch_states()
 
         self.root.after(50, self.poll_can)
@@ -691,8 +733,10 @@ class CZoneGui:
         self.refresh_switch_states()
         self.poll_can()
         self.root.mainloop()
-        if self.modbus_bridge:
-            self.modbus_bridge.close()
+        self._modbus_running = False
+        if hasattr(self, "_modbus_thread"):
+            self._modbus_thread.join(timeout=0.5)
+        self.modbus_bridge.close()
 
 
 # ---------------- MAIN ----------------
