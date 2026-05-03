@@ -105,6 +105,7 @@ class CANTransport(Protocol):
     def open(self): ...
     def send(self, can_id, data: bytes): ...
     def recv(self): ...
+    def close(self): ...
 
 
 class GCAN:
@@ -176,6 +177,9 @@ class GCAN:
         buffer = (CAN_OBJ * 50)()
         count = self.dll.Receive(USBCAN_II, DEVICE_INDEX, CAN_INDEX, buffer, 50, 0)
         return buffer[:count]
+
+    def close(self):
+        return
 
 
 class SocketCANTransport:
@@ -256,6 +260,14 @@ class SocketCANTransport:
                 obj.Data[i] = b
             frames.append(obj)
         return frames
+
+    def close(self):
+        if self.bus is not None:
+            try:
+                self.bus.shutdown()
+            except Exception:
+                pass
+            self.bus = None
 
 
 def resolve_serial_port(configured_port: str, current_os: str) -> str:
@@ -933,6 +945,34 @@ class CZoneGui:
         self.modbus_bridge.close()
 
 
+class CZoneHeadless:
+    def __init__(self, czone: CZone, modbus_port: str, modbus_baudrate: int):
+        self.czone = czone
+        self.modbus_bridge = ModbusBreakerBridge(port=modbus_port, baudrate=modbus_baudrate)
+        self.last_heartbeat = time.time()
+        self.last_status = time.time()
+        self.last_n2k_identity = time.time() - 60
+
+    def run(self):
+        print("CZone emulator headless mode running...")
+        self.czone.address_claim()
+        self.czone.product_information()
+        while True:
+            self.czone.process_rx()
+            now = time.time()
+            if now - self.last_heartbeat > 2:
+                self.last_heartbeat = now
+                self.czone.heartbeat()
+            if now - self.last_n2k_identity > 60:
+                self.last_n2k_identity = now
+                self.czone.address_claim()
+                self.czone.product_information()
+            if now - self.last_status > 2:
+                self.last_status = now
+                self.czone.detailed_status()
+            time.sleep(0.05)
+
+
 # ---------------- MAIN ----------------
 
 
@@ -958,18 +998,32 @@ def main():
         f"baudrate={modbus_baudrate}"
     )
 
-    czone = CZone(transport)
-    # Push presence/status frames immediately after CAN open so reconnects do not
-    # wait for GUI initialization timing.
-    for _ in range(3):
-        czone.address_claim()
-        czone.product_information()
-        czone.heartbeat()
-        czone.detailed_status()
-        time.sleep(0.1)
+    try:
+        czone = CZone(transport)
+        # Push presence/status frames immediately after CAN open so reconnects do not
+        # wait for GUI initialization timing.
+        for _ in range(3):
+            czone.address_claim()
+            czone.product_information()
+            czone.heartbeat()
+            czone.detailed_status()
+            time.sleep(0.1)
 
-    gui = CZoneGui(czone, modbus_port=resolved_port, modbus_baudrate=modbus_baudrate)
-    gui.run()
+        headless = os.getenv("HEADLESS", "").strip().lower() in {"1", "true", "yes"}
+        if platform.system() == "Linux" and not os.getenv("DISPLAY"):
+            headless = True
+        print(f"Startup UI mode: {'headless' if headless else 'gui'}")
+
+        if headless:
+            app = CZoneHeadless(czone, modbus_port=resolved_port, modbus_baudrate=modbus_baudrate)
+        else:
+            app = CZoneGui(czone, modbus_port=resolved_port, modbus_baudrate=modbus_baudrate)
+        app.run()
+    finally:
+        try:
+            transport.close()
+        except Exception:
+            pass
 
 
 if __name__ == "__main__":

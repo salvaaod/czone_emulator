@@ -72,7 +72,7 @@ set SERIAL_BAUDRATE=115200
 python czone_emulator.py
 ```
 
-### Linux (SocketCAN + awlink0 + /dev/ttyAS3)
+### Linux (SocketCAN + awlink0 + /dev/ttyAS3, headless default without DISPLAY)
 
 ```bash
 export CAN_BACKEND=socketcan
@@ -81,6 +81,8 @@ export CAN_AUTO_UP=1
 export CAN_BITRATE=250000
 export SERIAL_PORT=/dev/ttyAS3
 export SERIAL_BAUDRATE=115200
+# optional explicit headless override
+export HEADLESS=1
 python czone_emulator.py
 ```
 
@@ -99,6 +101,9 @@ python czone_emulator.py
   - If auto-up is disabled (`CAN_AUTO_UP=0`), ensure the interface exists and is up manually (for example via `ip link`).
   - Verify process privileges and CAN bitrate setup match your bus.
   - If no CAN peer is acknowledging frames, SocketCAN may raise ENOBUFS; the app now retries with a short backoff.
+- **No GUI display on Linux (`no $DISPLAY`)**
+  - The emulator now auto-switches to headless mode on Linux when `DISPLAY` is unset.
+  - Force behavior with `HEADLESS=1` (headless) or set `DISPLAY` for GUI mode.
 - **Linux serial permission denied**
   - Confirm user access to `/dev/ttyAS3` (for example group membership such as `dialout`).
 - **COM alias mismatch on Linux**
