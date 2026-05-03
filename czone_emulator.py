@@ -1,4 +1,5 @@
 import ctypes
+from errno import ENOBUFS
 import os
 import platform
 import struct
@@ -188,6 +189,8 @@ class SocketCANTransport:
         self.bus = None
         self.auto_up = os.getenv("CAN_AUTO_UP", "1").strip().lower() not in {"0", "false", "no"}
         self.bitrate = int(os.getenv("CAN_BITRATE", "250000"))
+        self.send_timeout_seconds = float(os.getenv("CAN_SEND_TIMEOUT_SECONDS", "0.2"))
+        self.send_retry_delay_seconds = float(os.getenv("CAN_SEND_RETRY_DELAY_SECONDS", "0.05"))
 
     def _is_link_up(self) -> bool:
         try:
@@ -201,13 +204,18 @@ class SocketCANTransport:
             return False
         return " state UP " in result.stdout or "<UP," in result.stdout
 
+    def _run_cmd(self, cmd: list[str], check: bool = True):
+        subprocess.run(cmd, check=check, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+
     def _ensure_link_up(self):
         if self._is_link_up():
             return
         if not self.auto_up:
             raise RuntimeError(f"SocketCAN interface {self.channel} is DOWN and CAN_AUTO_UP is disabled")
-        print(f"SocketCAN interface {self.channel} is DOWN; attempting to bring it up at {self.bitrate} bps")
-        subprocess.run(["ip", "link", "set", self.channel, "up", "type", "can", "bitrate", str(self.bitrate)], check=True)
+        print(f"SocketCAN interface {self.channel} is DOWN; resetting and bringing up at {self.bitrate} bps")
+        self._run_cmd(["ip", "link", "set", self.channel, "down"], check=False)
+        self._run_cmd(["ip", "link", "set", self.channel, "type", "can", "bitrate", str(self.bitrate)], check=False)
+        self._run_cmd(["ip", "link", "set", self.channel, "up"], check=True)
         if not self._is_link_up():
             raise RuntimeError(f"SocketCAN interface {self.channel} remains DOWN after bring-up attempt")
         print(f"SocketCAN interface {self.channel} is now UP")
@@ -221,7 +229,15 @@ class SocketCANTransport:
         if self.bus is None:
             raise RuntimeError("SocketCAN bus is not opened")
         msg = self._can.Message(arbitration_id=can_id, data=data, is_extended_id=True)
-        self.bus.send(msg)
+        while True:
+            try:
+                self.bus.send(msg, timeout=self.send_timeout_seconds)
+                return
+            except self._can.CanOperationError as exc:
+                error_code = getattr(exc, "error_code", None)
+                if error_code != ENOBUFS and "No buffer space available" not in str(exc):
+                    raise
+                time.sleep(self.send_retry_delay_seconds)
 
     def recv(self):
         if self.bus is None:

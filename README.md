@@ -21,6 +21,8 @@ Channel/interface selection:
 - Linux auto-bring-up controls:
   - `CAN_AUTO_UP` (default `1`) attempts `ip link set <iface> up type can bitrate <CAN_BITRATE>` when link is DOWN
   - `CAN_BITRATE` (default `250000`)
+  - `CAN_SEND_TIMEOUT_SECONDS` (default `0.2`)
+  - `CAN_SEND_RETRY_DELAY_SECONDS` (default `0.05`) retries ENOBUFS (`No buffer space available`) send errors
 
 GCAN DLL path:
 - `GCAN_DLL_PATH` override
@@ -96,6 +98,7 @@ python czone_emulator.py
   - By default the app attempts to bring the interface UP automatically using `CAN_BITRATE` (250000).
   - If auto-up is disabled (`CAN_AUTO_UP=0`), ensure the interface exists and is up manually (for example via `ip link`).
   - Verify process privileges and CAN bitrate setup match your bus.
+  - If no CAN peer is acknowledging frames, SocketCAN may raise ENOBUFS; the app now retries with a short backoff.
 - **Linux serial permission denied**
   - Confirm user access to `/dev/ttyAS3` (for example group membership such as `dialout`).
 - **COM alias mismatch on Linux**
