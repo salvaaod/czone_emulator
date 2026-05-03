@@ -951,17 +951,34 @@ class CZoneHeadless:
         self.czone = czone
         self.modbus_bridge = ModbusBreakerBridge(port=modbus_port, baudrate=modbus_baudrate)
         self.modbus_enabled = True
+        self.modbus_requests: Queue = Queue()
         self.modbus_events: Queue = Queue()
         self.pending_modbus_actions: dict[int, dict[str, float | bool | None]] = {}
         self._modbus_running = True
         self._modbus_thread = threading.Thread(target=self._modbus_worker, daemon=True)
         self._modbus_thread.start()
+        self.czone.on_switch_event = self.record_switch_event
         self.last_heartbeat = time.time()
         self.last_status = time.time()
         self.last_n2k_identity = time.time() - 60
 
     def _modbus_worker(self):
         while self._modbus_running:
+            try:
+                req = self.modbus_requests.get(timeout=MODBUS_POLL_INTERVAL_SECONDS)
+            except Empty:
+                req = None
+
+            if req:
+                action, switch_id, is_on = req
+                if action == "write":
+                    try:
+                        ok = self.modbus_bridge.write_command(switch_id, 2 if is_on else 1)
+                    except Exception as exc:
+                        ok = False
+                        self.modbus_events.put(("error", f"Modbus write error breaker {switch_id}: {exc}"))
+                    self.modbus_events.put(("write_ack", switch_id, is_on, ok))
+
             for switch_id in MODBUS_SWITCH_IDS:
                 try:
                     value = self.modbus_bridge.read_status(switch_id)
@@ -983,10 +1000,24 @@ class CZoneHeadless:
             if kind == "error":
                 print(event[1])
                 continue
+            if kind == "write_ack":
+                _, switch_id, is_on, ok = event
+                if not ok:
+                    print(f"Modbus write failed for breaker {switch_id}")
+                continue
             _, switch_id, value = event
             if value is None:
                 continue
             is_on = value == 2
+            pending = self.pending_modbus_actions.get(switch_id)
+            if pending:
+                pending["last_polled"] = is_on
+                desired = bool(pending["desired"])
+                if is_on == desired:
+                    self.pending_modbus_actions.pop(switch_id, None)
+                else:
+                    continue
+
             before = bool(self.czone.state & (1 << (switch_id - 1)))
             after = self.czone._set_switch(0x04 + switch_id, is_on)
             if after != before:
@@ -995,6 +1026,38 @@ class CZoneHeadless:
                 self.czone.heartbeat()
                 self.czone.detailed_status()
 
+    def _check_modbus_timeouts(self):
+        now = time.time()
+        expired = [sid for sid, info in self.pending_modbus_actions.items() if now > float(info["deadline"])]
+        for switch_id in expired:
+            info = self.pending_modbus_actions.pop(switch_id)
+            desired = bool(info["desired"])
+            last_polled = info.get("last_polled")
+
+            if desired:
+                final_state = False if last_polled is not True else True
+            else:
+                final_state = True if last_polled is True else False
+
+            before = bool(self.czone.state & (1 << (switch_id - 1)))
+            after = self.czone._set_switch(0x04 + switch_id, final_state)
+            if after != before:
+                print(f"Modbus timeout on breaker {switch_id}; final virtual state {'ON' if after else 'OFF'}")
+                self.czone.heartbeat()
+                self.czone.detailed_status()
+
+    def _send_modbus_command(self, switch_id: int, is_on: bool):
+        if not self.modbus_enabled:
+            return
+        self.pending_modbus_actions[switch_id] = {"desired": is_on, "deadline": time.time() + MODBUS_ACTION_TIMEOUT_SECONDS, "last_polled": None}
+        self.modbus_requests.put(("write", switch_id, is_on))
+
+    def record_switch_event(self, switch_code: int, is_on: bool):
+        switch_id = (switch_code - 0x05) + 1
+        state_text = "ON" if is_on else "OFF"
+        print(f"Switch {switch_id} (code 0x{switch_code:02X}) -> {state_text}")
+        self._send_modbus_command(switch_id, is_on)
+
     def run(self):
         print("CZone emulator headless mode running...")
         self.czone.address_claim()
@@ -1002,6 +1065,7 @@ class CZoneHeadless:
         while True:
             self.czone.process_rx()
             self._process_modbus_events()
+            self._check_modbus_timeouts()
             now = time.time()
             if now - self.last_heartbeat > 2:
                 self.last_heartbeat = now
