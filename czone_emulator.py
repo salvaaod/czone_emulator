@@ -628,6 +628,7 @@ class ModbusBreakerBridge:
         if self.ser and self.ser.is_open:
             return
         self.ser = serial.Serial(self.port, self.baudrate, timeout=0.2)
+        print(f"Modbus serial connected: port={self.port}, baudrate={self.baudrate}")
 
     @staticmethod
     def _crc16(data: bytes) -> int:
@@ -949,9 +950,50 @@ class CZoneHeadless:
     def __init__(self, czone: CZone, modbus_port: str, modbus_baudrate: int):
         self.czone = czone
         self.modbus_bridge = ModbusBreakerBridge(port=modbus_port, baudrate=modbus_baudrate)
+        self.modbus_enabled = True
+        self.modbus_events: Queue = Queue()
+        self.pending_modbus_actions: dict[int, dict[str, float | bool | None]] = {}
+        self._modbus_running = True
+        self._modbus_thread = threading.Thread(target=self._modbus_worker, daemon=True)
+        self._modbus_thread.start()
         self.last_heartbeat = time.time()
         self.last_status = time.time()
         self.last_n2k_identity = time.time() - 60
+
+    def _modbus_worker(self):
+        while self._modbus_running:
+            for switch_id in MODBUS_SWITCH_IDS:
+                try:
+                    value = self.modbus_bridge.read_status(switch_id)
+                except Exception as exc:
+                    self.modbus_events.put(("error", f"Modbus poll error: {exc}"))
+                    self.modbus_enabled = False
+                    return
+                self.modbus_events.put(("status", switch_id, value))
+            time.sleep(MODBUS_POLL_INTERVAL_SECONDS)
+
+    def _process_modbus_events(self):
+        while True:
+            try:
+                event = self.modbus_events.get_nowait()
+            except Empty:
+                break
+
+            kind = event[0]
+            if kind == "error":
+                print(event[1])
+                continue
+            _, switch_id, value = event
+            if value is None:
+                continue
+            is_on = value == 2
+            before = bool(self.czone.state & (1 << (switch_id - 1)))
+            after = self.czone._set_switch(0x04 + switch_id, is_on)
+            if after != before:
+                source_state = {1: "OPEN", 2: "CLOSED", 3: "TRIPPED/LOCKED"}.get(value, f"RAW={value}")
+                print(f"Modbus breaker {switch_id} status -> {source_state}")
+                self.czone.heartbeat()
+                self.czone.detailed_status()
 
     def run(self):
         print("CZone emulator headless mode running...")
@@ -959,6 +1001,7 @@ class CZoneHeadless:
         self.czone.product_information()
         while True:
             self.czone.process_rx()
+            self._process_modbus_events()
             now = time.time()
             if now - self.last_heartbeat > 2:
                 self.last_heartbeat = now
@@ -971,6 +1014,12 @@ class CZoneHeadless:
                 self.last_status = now
                 self.czone.detailed_status()
             time.sleep(0.05)
+
+    def close(self):
+        self._modbus_running = False
+        if hasattr(self, "_modbus_thread"):
+            self._modbus_thread.join(timeout=0.5)
+        self.modbus_bridge.close()
 
 
 # ---------------- MAIN ----------------
@@ -1018,7 +1067,11 @@ def main():
             app = CZoneHeadless(czone, modbus_port=resolved_port, modbus_baudrate=modbus_baudrate)
         else:
             app = CZoneGui(czone, modbus_port=resolved_port, modbus_baudrate=modbus_baudrate)
-        app.run()
+        try:
+            app.run()
+        finally:
+            if hasattr(app, "close"):
+                app.close()
     finally:
         try:
             transport.close()

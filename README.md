@@ -46,6 +46,7 @@ Serial selection supports COM compatibility on Linux:
 Defaults and overrides:
 - `SERIAL_PORT` (default `COM8`)
 - `SERIAL_BAUDRATE` (default `115200`)
+  - Linux headless mode uses this same baudrate for RS485 polling/transmission via Modbus.
 - `SERIAL_LINUX_DEFAULT_PORT` (default `/dev/ttyAS3`)
 - `SERIAL_COM_ALIAS_MAP` (comma-separated mapping, example `COM8=/dev/ttyAS3,COM9=/dev/ttyUSB0`)
 
@@ -53,6 +54,7 @@ Expected startup log example:
 
 ```text
 Startup serial selection: configured=COM8, resolved=/dev/ttyAS3, baudrate=115200
+Modbus serial connected: port=/dev/ttyAS3, baudrate=115200
 ```
 
 ## Startup examples
