@@ -375,7 +375,7 @@ class CZone:
     state: int = 0
     authenticated: bool = True
     on_switch_event: Optional[Callable[[int, bool], None]] = None
-    logger: Optional[AppLogger] = None
+    logger: Optional["AppLogger"] = None
     czone_dip_switch: int = CZONE_DIP_SWITCH_DEFAULT
     pending_commands: dict[int, int] | None = None
     keyboard_switch_maps: dict[int, dict[int, int]] | None = None
