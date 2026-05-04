@@ -747,13 +747,19 @@ class CZoneWebServer:
         def index():
             return """<!doctype html>
 <html><head><meta charset='utf-8'><title>CZone Emulator</title>
-<style>body{font-family:Arial,sans-serif;margin:16px}button{padding:8px;margin:4px}.on{background:#2e7d32;color:#fff}.off{background:#c62828;color:#fff}pre{background:#111;color:#d7ffd7;padding:8px;height:280px;overflow:auto}</style></head>
-<body><h2>CZone OI Emulator (Headless Web)</h2><div id='states'></div><div id='buttons'></div><h3>Logs</h3><pre id='logs'></pre>
+<style>body{font-family:Arial,sans-serif;margin:16px}button{padding:8px;margin:4px}.on{background:#2e7d32;color:#fff}.off{background:#c62828;color:#fff}.card{border:1px solid #ccc;border-radius:8px;padding:10px;margin-bottom:10px}label{display:inline-block;min-width:110px}input[type=number]{width:90px}pre{background:#111;color:#d7ffd7;padding:8px;height:280px;overflow:auto}</style></head>
+<body><h2>CZone OI Emulator (Headless Web)</h2>
+<div class='card'><div id='states'></div><div id='mapping'></div></div>
+<div class='card'><h3>Switches</h3><div id='buttons'></div></div>
+<div class='card'><h3>Output currents (A)</h3><div id='currents'></div></div>
+<div class='card'><h3>Logs</h3><pre id='logs'></pre></div>
 <script>
 async function refresh(){const s=await (await fetch('/api/state')).json();const l=await (await fetch('/api/logs')).json();
 const st=s.switch_states.map((v,i)=>`S${i+1}: ${v?'ON':'OFF'}`).join(' | ');document.getElementById('states').innerText=`DIP: ${s.czone_dip_switch}   ${st}`;
+const mapLines=Object.entries(s.mappings).map(([kbd,m])=>`KBD ${kbd}: `+Object.entries(m).map(([k,v])=>`${k}->${v}`).join(', '));document.getElementById('mapping').innerText='Mappings:\\n'+mapLines.join('\\n');
 const b=document.getElementById('buttons');b.innerHTML='';s.switch_states.forEach((v,i)=>{const id=i+1;const btn=document.createElement('button');btn.className=v?'on':'off';btn.textContent=`Toggle S${id} (${v?'ON':'OFF'})`;btn.onclick=()=>fetch('/api/toggle',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({switch_id:id})}).then(refresh);b.appendChild(btn);});
-document.getElementById('logs').textContent=l.logs.join('\n');}
+const c=document.getElementById('currents');c.innerHTML='';Object.entries(s.output_currents).forEach(([k,val])=>{const row=document.createElement('div');row.style.margin='5px 0';row.innerHTML=`<label>Output ${k}</label><input step='0.1' min='0' max='25.5' type='number' id='out_${k}' value='${Number(val).toFixed(1)}'><button>Apply</button>`;row.querySelector('button').onclick=()=>{const amps=parseFloat(document.getElementById(`out_${k}`).value||'0');fetch('/api/output_current',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({output_index:Number(k),amps:amps})}).then(refresh)};c.appendChild(row);});
+document.getElementById('logs').textContent=l.logs.join('\\n');}
 setInterval(refresh,1000);refresh();
 </script></body></html>
 """
@@ -763,6 +769,14 @@ setInterval(refresh,1000);refresh();
             return jsonify({
                 'switch_states': self.czone.get_switch_states(),
                 'czone_dip_switch': self.czone.czone_dip_switch,
+                'output_currents': {
+                    str(output_index): self.czone.get_output_current(output_index)
+                    for output_index in range(1, ADJUSTABLE_OUTPUT_COUNT + 1)
+                },
+                'mappings': {
+                    str(keyboard_id): {f"0x{k:02X}": v for k, v in sorted(mapping.items())}
+                    for keyboard_id, mapping in sorted(self.czone.keyboard_switch_maps.items())
+                },
             })
 
         @self.app.post('/api/toggle')
@@ -777,6 +791,19 @@ setInterval(refresh,1000);refresh();
             self.czone.heartbeat()
             self.czone.detailed_status()
             return jsonify({'switch_id': switch_id, 'is_on': updated})
+
+        @self.app.post('/api/output_current')
+        def set_output_current():
+            payload = request.get_json(silent=True) or {}
+            output_index = int(payload.get('output_index', 0))
+            amps = float(payload.get('amps', 0.0))
+            if not (1 <= output_index <= ADJUSTABLE_OUTPUT_COUNT):
+                return jsonify({'error': f'output_index must be 1..{ADJUSTABLE_OUTPUT_COUNT}'}), 400
+            self.czone.set_output_current(output_index, amps)
+            normalized = self.czone.get_output_current(output_index)
+            self.logger.log(f"Web output {output_index} current -> {normalized:.1f} A")
+            self.czone.detailed_status()
+            return jsonify({'output_index': output_index, 'amps': normalized})
 
         @self.app.get('/api/logs')
         def logs():
