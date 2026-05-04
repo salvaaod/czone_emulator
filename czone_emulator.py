@@ -747,7 +747,7 @@ class CZoneWebServer:
         def index():
             return """<!doctype html>
 <html><head><meta charset='utf-8'><title>CZone Emulator</title>
-<style>body{font-family:Arial,sans-serif;margin:16px}button{padding:8px;margin:4px}.on{background:#2e7d32;color:#fff}.off{background:#c62828;color:#fff}.card{border:1px solid #ccc;border-radius:8px;padding:10px;margin-bottom:10px}label{display:inline-block;min-width:110px}input[type=number]{width:90px}pre{background:#111;color:#d7ffd7;padding:8px;height:280px;overflow:auto}</style></head>
+<style>body{font-family:Arial,sans-serif;margin:16px}button{padding:8px;margin:4px}.on{background:#2e7d32;color:#fff}.off{background:#c62828;color:#fff}.card{border:1px solid #ccc;border-radius:8px;padding:10px;margin-bottom:10px}label{display:inline-block;min-width:110px}input[type=number]{width:90px}pre{background:#111;color:#d7ffd7;padding:8px;white-space:pre-wrap;line-height:1.25em}</style></head>
 <body><h2>CZone OI Emulator (Headless Web)</h2>
 <div class='card'><div id='states'></div><div id='mapping'></div></div>
 <div class='card'><h3>Switches</h3><div id='buttons'></div></div>
@@ -759,7 +759,7 @@ const st=s.switch_states.map((v,i)=>`S${i+1}: ${v?'ON':'OFF'}`).join(' | ');docu
 const mapLines=Object.entries(s.mappings).map(([kbd,m])=>`KBD ${kbd}: `+Object.entries(m).map(([k,v])=>`${k}->${v}`).join(', '));document.getElementById('mapping').innerText='Mappings:\\n'+mapLines.join('\\n');
 const b=document.getElementById('buttons');b.innerHTML='';s.switch_states.forEach((v,i)=>{const id=i+1;const btn=document.createElement('button');btn.className=v?'on':'off';btn.textContent=`Toggle S${id} (${v?'ON':'OFF'})`;btn.onclick=()=>fetch('/api/toggle',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({switch_id:id})}).then(refresh);b.appendChild(btn);});
 const c=document.getElementById('currents');c.innerHTML='';Object.entries(s.output_currents).forEach(([k,val])=>{const row=document.createElement('div');row.style.margin='5px 0';row.innerHTML=`<label>Output ${k}</label><input step='0.1' min='0' max='25.5' type='number' id='out_${k}' value='${Number(val).toFixed(1)}'><button>Apply</button>`;row.querySelector('button').onclick=()=>{const amps=parseFloat(document.getElementById(`out_${k}`).value||'0');fetch('/api/output_current',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({output_index:Number(k),amps:amps})}).then(refresh)};c.appendChild(row);});
-document.getElementById('logs').textContent=l.logs.join('\\n');}
+document.getElementById('logs').textContent=(l.logs||[]).slice(-50).join('\\n');}
 setInterval(refresh,1000);refresh();
 </script></body></html>
 """
