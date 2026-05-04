@@ -7,6 +7,7 @@ import subprocess
 import threading
 import time
 import tkinter as tk
+from flask import Flask, jsonify, request
 from queue import Empty, Queue
 from dataclasses import dataclass
 from typing import Callable, Optional, Protocol
@@ -374,6 +375,7 @@ class CZone:
     state: int = 0
     authenticated: bool = True
     on_switch_event: Optional[Callable[[int, bool], None]] = None
+    logger: Optional[AppLogger] = None
     czone_dip_switch: int = CZONE_DIP_SWITCH_DEFAULT
     pending_commands: dict[int, int] | None = None
     keyboard_switch_maps: dict[int, dict[int, int]] | None = None
@@ -449,7 +451,10 @@ class CZone:
             offset += 7
 
     def _log(self, message: str):
-        print(message)
+        if self.logger:
+            self.logger.log(message)
+        else:
+            print(message)
 
     def get_switch_states(self):
         states = []
@@ -695,6 +700,81 @@ class ModbusBreakerBridge:
     def close(self):
         if self.ser and self.ser.is_open:
             self.ser.close()
+
+
+
+
+class AppLogger:
+    def __init__(self, max_entries: int = 500):
+        self.max_entries = max_entries
+        self.entries: list[str] = []
+        self._lock = threading.Lock()
+
+    def log(self, message: str):
+        print(message)
+        timestamped = f"{time.strftime('%Y-%m-%d %H:%M:%S')} | {message}"
+        with self._lock:
+            self.entries.append(timestamped)
+            if len(self.entries) > self.max_entries:
+                self.entries = self.entries[-self.max_entries :]
+
+    def get_entries(self) -> list[str]:
+        with self._lock:
+            return list(self.entries)
+
+
+class CZoneWebServer:
+    def __init__(self, czone: CZone, logger: AppLogger, host: str = '0.0.0.0', port: int = 8080):
+        self.czone = czone
+        self.logger = logger
+        self.host = host
+        self.port = port
+        self.app = Flask(__name__)
+        self._setup_routes()
+
+    def _setup_routes(self):
+        @self.app.get('/')
+        def index():
+            return """<!doctype html>
+<html><head><meta charset='utf-8'><title>CZone Emulator</title>
+<style>body{font-family:Arial,sans-serif;margin:16px}button{padding:8px;margin:4px}.on{background:#2e7d32;color:#fff}.off{background:#c62828;color:#fff}pre{background:#111;color:#d7ffd7;padding:8px;height:280px;overflow:auto}</style></head>
+<body><h2>CZone OI Emulator (Headless Web)</h2><div id='states'></div><div id='buttons'></div><h3>Logs</h3><pre id='logs'></pre>
+<script>
+async function refresh(){const s=await (await fetch('/api/state')).json();const l=await (await fetch('/api/logs')).json();
+const st=s.switch_states.map((v,i)=>`S${i+1}: ${v?'ON':'OFF'}`).join(' | ');document.getElementById('states').innerText=`DIP: ${s.czone_dip_switch}   ${st}`;
+const b=document.getElementById('buttons');b.innerHTML='';s.switch_states.forEach((v,i)=>{const id=i+1;const btn=document.createElement('button');btn.className=v?'on':'off';btn.textContent=`Toggle S${id} (${v?'ON':'OFF'})`;btn.onclick=()=>fetch('/api/toggle',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({switch_id:id})}).then(refresh);b.appendChild(btn);});
+document.getElementById('logs').textContent=l.logs.join('\n');}
+setInterval(refresh,1000);refresh();
+</script></body></html>
+"""
+
+        @self.app.get('/api/state')
+        def state():
+            return jsonify({
+                'switch_states': self.czone.get_switch_states(),
+                'czone_dip_switch': self.czone.czone_dip_switch,
+            })
+
+        @self.app.post('/api/toggle')
+        def toggle():
+            payload = request.get_json(silent=True) or {}
+            switch_id = int(payload.get('switch_id', 0))
+            if not (1 <= switch_id <= 4):
+                return jsonify({'error': 'switch_id must be 1..4'}), 400
+            current = self.czone.get_switch_states()[switch_id - 1]
+            updated = self.czone._set_switch(0x04 + switch_id, not current)
+            self.logger.log(f"Web switch {switch_id} -> {'ON' if updated else 'OFF'}")
+            self.czone.heartbeat()
+            self.czone.detailed_status()
+            return jsonify({'switch_id': switch_id, 'is_on': updated})
+
+        @self.app.get('/api/logs')
+        def logs():
+            return jsonify({'logs': self.logger.get_entries()})
+
+    def run(self):
+        self.logger.log(f'Web server listening on http://{self.host}:{self.port}')
+        self.app.run(host=self.host, port=self.port, debug=False, use_reloader=False)
 
 
 class CZoneGui:
@@ -947,8 +1027,9 @@ class CZoneGui:
 
 
 class CZoneHeadless:
-    def __init__(self, czone: CZone, modbus_port: str, modbus_baudrate: int):
+    def __init__(self, czone: CZone, logger: AppLogger, modbus_port: str, modbus_baudrate: int):
         self.czone = czone
+        self.logger = logger
         self.modbus_bridge = ModbusBreakerBridge(port=modbus_port, baudrate=modbus_baudrate)
         self.modbus_enabled = True
         self.modbus_requests: Queue = Queue()
@@ -998,12 +1079,12 @@ class CZoneHeadless:
 
             kind = event[0]
             if kind == "error":
-                print(event[1])
+                self.logger.log(event[1])
                 continue
             if kind == "write_ack":
                 _, switch_id, is_on, ok = event
                 if not ok:
-                    print(f"Modbus write failed for breaker {switch_id}")
+                    self.logger.log(f"Modbus write failed for breaker {switch_id}")
                 continue
             _, switch_id, value = event
             if value is None:
@@ -1022,7 +1103,7 @@ class CZoneHeadless:
             after = self.czone._set_switch(0x04 + switch_id, is_on)
             if after != before:
                 source_state = {1: "OPEN", 2: "CLOSED", 3: "TRIPPED/LOCKED"}.get(value, f"RAW={value}")
-                print(f"Modbus breaker {switch_id} status -> {source_state}")
+                self.logger.log(f"Modbus breaker {switch_id} status -> {source_state}")
                 self.czone.heartbeat()
                 self.czone.detailed_status()
 
@@ -1042,7 +1123,7 @@ class CZoneHeadless:
             before = bool(self.czone.state & (1 << (switch_id - 1)))
             after = self.czone._set_switch(0x04 + switch_id, final_state)
             if after != before:
-                print(f"Modbus timeout on breaker {switch_id}; final virtual state {'ON' if after else 'OFF'}")
+                self.logger.log(f"Modbus timeout on breaker {switch_id}; final virtual state {'ON' if after else 'OFF'}")
                 self.czone.heartbeat()
                 self.czone.detailed_status()
 
@@ -1055,11 +1136,11 @@ class CZoneHeadless:
     def record_switch_event(self, switch_code: int, is_on: bool):
         switch_id = (switch_code - 0x05) + 1
         state_text = "ON" if is_on else "OFF"
-        print(f"Switch {switch_id} (code 0x{switch_code:02X}) -> {state_text}")
+        self.logger.log(f"Switch {switch_id} (code 0x{switch_code:02X}) -> {state_text}")
         self._send_modbus_command(switch_id, is_on)
 
     def run(self):
-        print("CZone emulator headless mode running...")
+        self.logger.log("CZone emulator headless mode running...")
         self.czone.address_claim()
         self.czone.product_information()
         while True:
@@ -1112,7 +1193,8 @@ def main():
     )
 
     try:
-        czone = CZone(transport)
+        logger = AppLogger()
+        czone = CZone(transport, logger=logger)
         # Push presence/status frames immediately after CAN open so reconnects do not
         # wait for GUI initialization timing.
         for _ in range(3):
@@ -1128,7 +1210,12 @@ def main():
         print(f"Startup UI mode: {'headless' if headless else 'gui'}")
 
         if headless:
-            app = CZoneHeadless(czone, modbus_port=resolved_port, modbus_baudrate=modbus_baudrate)
+            web_host = os.getenv("WEB_HOST", "0.0.0.0")
+            web_port = int(os.getenv("WEB_PORT", "8080"))
+            web_server = CZoneWebServer(czone, logger=logger, host=web_host, port=web_port)
+            web_thread = threading.Thread(target=web_server.run, daemon=True)
+            web_thread.start()
+            app = CZoneHeadless(czone, logger=logger, modbus_port=resolved_port, modbus_baudrate=modbus_baudrate)
         else:
             app = CZoneGui(czone, modbus_port=resolved_port, modbus_baudrate=modbus_baudrate)
         try:
