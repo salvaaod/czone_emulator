@@ -754,11 +754,20 @@ class CZoneWebServer:
 <div class='card'><h3>Output currents (A)</h3><div id='currents'></div></div>
 <div class='card'><h3>Logs</h3><pre id='logs'></pre></div>
 <script>
-async function refresh(){const s=await (await fetch('/api/state')).json();const l=await (await fetch('/api/logs')).json();
+let uiInit=false;
+function ensureUi(s){
+if(uiInit) return;
+const b=document.getElementById('buttons');
+s.switch_states.forEach((_,i)=>{const id=i+1;const btn=document.createElement('button');btn.id=`sw_${id}`;btn.onclick=()=>fetch('/api/toggle',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({switch_id:id})}).then(refresh);b.appendChild(btn);});
+const c=document.getElementById('currents');
+Object.entries(s.output_currents).forEach(([k,val])=>{const row=document.createElement('div');row.style.margin='5px 0';row.innerHTML=`<label>Output ${k}</label><input step='0.1' min='0' max='25.5' type='number' id='out_${k}' value='${Number(val).toFixed(1)}'><button id='apply_${k}'>Apply</button>`;row.querySelector('button').onclick=()=>{const amps=parseFloat(document.getElementById(`out_${k}`).value||'0');fetch('/api/output_current',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({output_index:Number(k),amps:amps})}).then(refresh)};c.appendChild(row);});
+uiInit=true;
+}
+async function refresh(){const s=await (await fetch('/api/state')).json();const l=await (await fetch('/api/logs')).json();ensureUi(s);
 const st=s.switch_states.map((v,i)=>`S${i+1}: ${v?'ON':'OFF'}`).join(' | ');document.getElementById('states').innerText=`DIP: ${s.czone_dip_switch}   ${st}`;
 const mapLines=Object.entries(s.mappings).map(([kbd,m])=>`KBD ${kbd}: `+Object.entries(m).map(([k,v])=>`${k}->${v}`).join(', '));document.getElementById('mapping').innerText='Mappings:\\n'+mapLines.join('\\n');
-const b=document.getElementById('buttons');b.innerHTML='';s.switch_states.forEach((v,i)=>{const id=i+1;const btn=document.createElement('button');btn.className=v?'on':'off';btn.textContent=`Toggle S${id} (${v?'ON':'OFF'})`;btn.onclick=()=>fetch('/api/toggle',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({switch_id:id})}).then(refresh);b.appendChild(btn);});
-const c=document.getElementById('currents');c.innerHTML='';Object.entries(s.output_currents).forEach(([k,val])=>{const row=document.createElement('div');row.style.margin='5px 0';row.innerHTML=`<label>Output ${k}</label><input step='0.1' min='0' max='25.5' type='number' id='out_${k}' value='${Number(val).toFixed(1)}'><button>Apply</button>`;row.querySelector('button').onclick=()=>{const amps=parseFloat(document.getElementById(`out_${k}`).value||'0');fetch('/api/output_current',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({output_index:Number(k),amps:amps})}).then(refresh)};c.appendChild(row);});
+s.switch_states.forEach((v,i)=>{const id=i+1;const btn=document.getElementById(`sw_${id}`);btn.className=v?'on':'off';btn.textContent=`Toggle S${id} (${v?'ON':'OFF'})`;});
+Object.entries(s.output_currents).forEach(([k,val])=>{const input=document.getElementById(`out_${k}`);if(document.activeElement!==input){input.value=Number(val).toFixed(1);}});
 document.getElementById('logs').textContent=(l.logs||[]).slice(-50).join('\\n');}
 setInterval(refresh,1000);refresh();
 </script></body></html>
@@ -788,6 +797,8 @@ setInterval(refresh,1000);refresh();
             current = self.czone.get_switch_states()[switch_id - 1]
             updated = self.czone._set_switch(0x04 + switch_id, not current)
             self.logger.log(f"Web switch {switch_id} -> {'ON' if updated else 'OFF'}")
+            if self.czone.on_switch_event:
+                self.czone.on_switch_event(0x04 + switch_id, updated)
             self.czone.heartbeat()
             self.czone.detailed_status()
             return jsonify({'switch_id': switch_id, 'is_on': updated})
