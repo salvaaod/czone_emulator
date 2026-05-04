@@ -196,6 +196,7 @@ class SocketCANTransport:
         self.bitrate = int(os.getenv("CAN_BITRATE", "250000"))
         self.send_timeout_seconds = float(os.getenv("CAN_SEND_TIMEOUT_SECONDS", "0.2"))
         self.send_retry_delay_seconds = float(os.getenv("CAN_SEND_RETRY_DELAY_SECONDS", "0.05"))
+        self.max_send_retries = int(os.getenv("CAN_SEND_MAX_RETRIES", "40"))
 
     def _is_link_up(self) -> bool:
         try:
@@ -234,6 +235,7 @@ class SocketCANTransport:
         if self.bus is None:
             raise RuntimeError("SocketCAN bus is not opened")
         msg = self._can.Message(arbitration_id=can_id, data=data, is_extended_id=True)
+        retries = 0
         while True:
             try:
                 self.bus.send(msg, timeout=self.send_timeout_seconds)
@@ -242,6 +244,11 @@ class SocketCANTransport:
                 error_code = getattr(exc, "error_code", None)
                 if error_code != ENOBUFS and "No buffer space available" not in str(exc):
                     raise
+                retries += 1
+                if retries >= self.max_send_retries:
+                    raise RuntimeError(
+                        f"SocketCAN send failed after {retries} retries (interface={self.channel})"
+                    ) from exc
                 time.sleep(self.send_retry_delay_seconds)
 
     def recv(self):
@@ -432,7 +439,10 @@ class CZone:
         self.output_block_overrides.pop(output_index, None)
 
     def send(self, pgn, data, priority=7):
-        self.dev.send(n2k_id(priority, pgn, SRC), data)
+        try:
+            self.dev.send(n2k_id(priority, pgn, SRC), data)
+        except Exception as exc:
+            self._log(f"CAN TX failed for PGN {pgn}: {exc}")
 
     def send_fast_packet(self, pgn: int, payload: bytes, priority: int = 6):
         seq = int(time.time() * 1000) & 0x07
@@ -1195,6 +1205,18 @@ def main():
     try:
         logger = AppLogger()
         czone = CZone(transport, logger=logger)
+        web_thread = None
+        web_server = None
+        headless = os.getenv("HEADLESS", "").strip().lower() in {"1", "true", "yes"}
+        if platform.system() == "Linux" and not os.getenv("DISPLAY"):
+            headless = True
+        print(f"Startup UI mode: {'headless' if headless else 'gui'}")
+        if headless:
+            web_host = os.getenv("WEB_HOST", "0.0.0.0")
+            web_port = int(os.getenv("WEB_PORT", "8080"))
+            web_server = CZoneWebServer(czone, logger=logger, host=web_host, port=web_port)
+            web_thread = threading.Thread(target=web_server.run, daemon=True)
+            web_thread.start()
         # Push presence/status frames immediately after CAN open so reconnects do not
         # wait for GUI initialization timing.
         for _ in range(3):
@@ -1204,17 +1226,7 @@ def main():
             czone.detailed_status()
             time.sleep(0.1)
 
-        headless = os.getenv("HEADLESS", "").strip().lower() in {"1", "true", "yes"}
-        if platform.system() == "Linux" and not os.getenv("DISPLAY"):
-            headless = True
-        print(f"Startup UI mode: {'headless' if headless else 'gui'}")
-
         if headless:
-            web_host = os.getenv("WEB_HOST", "0.0.0.0")
-            web_port = int(os.getenv("WEB_PORT", "8080"))
-            web_server = CZoneWebServer(czone, logger=logger, host=web_host, port=web_port)
-            web_thread = threading.Thread(target=web_server.run, daemon=True)
-            web_thread.start()
             app = CZoneHeadless(czone, logger=logger, modbus_port=resolved_port, modbus_baudrate=modbus_baudrate)
         else:
             app = CZoneGui(czone, modbus_port=resolved_port, modbus_baudrate=modbus_baudrate)
