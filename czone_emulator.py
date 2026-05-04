@@ -7,6 +7,7 @@ import subprocess
 import threading
 import time
 import tkinter as tk
+from flask import Flask, jsonify, request
 from queue import Empty, Queue
 from dataclasses import dataclass
 from typing import Callable, Optional, Protocol
@@ -195,6 +196,7 @@ class SocketCANTransport:
         self.bitrate = int(os.getenv("CAN_BITRATE", "250000"))
         self.send_timeout_seconds = float(os.getenv("CAN_SEND_TIMEOUT_SECONDS", "0.2"))
         self.send_retry_delay_seconds = float(os.getenv("CAN_SEND_RETRY_DELAY_SECONDS", "0.05"))
+        self.max_send_retries = int(os.getenv("CAN_SEND_MAX_RETRIES", "40"))
 
     def _is_link_up(self) -> bool:
         try:
@@ -233,6 +235,7 @@ class SocketCANTransport:
         if self.bus is None:
             raise RuntimeError("SocketCAN bus is not opened")
         msg = self._can.Message(arbitration_id=can_id, data=data, is_extended_id=True)
+        retries = 0
         while True:
             try:
                 self.bus.send(msg, timeout=self.send_timeout_seconds)
@@ -241,6 +244,11 @@ class SocketCANTransport:
                 error_code = getattr(exc, "error_code", None)
                 if error_code != ENOBUFS and "No buffer space available" not in str(exc):
                     raise
+                retries += 1
+                if retries >= self.max_send_retries:
+                    raise RuntimeError(
+                        f"SocketCAN send failed after {retries} retries (interface={self.channel})"
+                    ) from exc
                 time.sleep(self.send_retry_delay_seconds)
 
     def recv(self):
@@ -374,6 +382,7 @@ class CZone:
     state: int = 0
     authenticated: bool = True
     on_switch_event: Optional[Callable[[int, bool], None]] = None
+    logger: Optional["AppLogger"] = None
     czone_dip_switch: int = CZONE_DIP_SWITCH_DEFAULT
     pending_commands: dict[int, int] | None = None
     keyboard_switch_maps: dict[int, dict[int, int]] | None = None
@@ -430,7 +439,10 @@ class CZone:
         self.output_block_overrides.pop(output_index, None)
 
     def send(self, pgn, data, priority=7):
-        self.dev.send(n2k_id(priority, pgn, SRC), data)
+        try:
+            self.dev.send(n2k_id(priority, pgn, SRC), data)
+        except Exception as exc:
+            self._log(f"CAN TX failed for PGN {pgn}: {exc}")
 
     def send_fast_packet(self, pgn: int, payload: bytes, priority: int = 6):
         seq = int(time.time() * 1000) & 0x07
@@ -449,7 +461,10 @@ class CZone:
             offset += 7
 
     def _log(self, message: str):
-        print(message)
+        if self.logger:
+            self.logger.log(message)
+        else:
+            print(message)
 
     def get_switch_states(self):
         states = []
@@ -695,6 +710,119 @@ class ModbusBreakerBridge:
     def close(self):
         if self.ser and self.ser.is_open:
             self.ser.close()
+
+
+
+
+class AppLogger:
+    def __init__(self, max_entries: int = 500):
+        self.max_entries = max_entries
+        self.entries: list[str] = []
+        self._lock = threading.Lock()
+
+    def log(self, message: str):
+        print(message)
+        timestamped = f"{time.strftime('%Y-%m-%d %H:%M:%S')} | {message}"
+        with self._lock:
+            self.entries.append(timestamped)
+            if len(self.entries) > self.max_entries:
+                self.entries = self.entries[-self.max_entries :]
+
+    def get_entries(self) -> list[str]:
+        with self._lock:
+            return list(self.entries)
+
+
+class CZoneWebServer:
+    def __init__(self, czone: CZone, logger: AppLogger, host: str = '0.0.0.0', port: int = 8080):
+        self.czone = czone
+        self.logger = logger
+        self.host = host
+        self.port = port
+        self.app = Flask(__name__)
+        self._setup_routes()
+
+    def _setup_routes(self):
+        @self.app.get('/')
+        def index():
+            return """<!doctype html>
+<html><head><meta charset='utf-8'><title>CZone Emulator</title>
+<style>body{font-family:Arial,sans-serif;margin:16px}button{padding:8px;margin:4px}.on{background:#2e7d32;color:#fff}.off{background:#c62828;color:#fff}.card{border:1px solid #ccc;border-radius:8px;padding:10px;margin-bottom:10px}label{display:inline-block;min-width:110px}input[type=number]{width:90px}pre{background:#111;color:#d7ffd7;padding:8px;white-space:pre-wrap;line-height:1.25em}</style></head>
+<body><h2>CZone OI Emulator (Headless Web)</h2>
+<div class='card'><div id='states'></div><div id='mapping'></div></div>
+<div class='card'><h3>Switches</h3><div id='buttons'></div></div>
+<div class='card'><h3>Output currents (A)</h3><div id='currents'></div></div>
+<div class='card'><h3>Logs</h3><pre id='logs'></pre></div>
+<script>
+let uiInit=false;
+function ensureUi(s){
+if(uiInit) return;
+const b=document.getElementById('buttons');
+s.switch_states.forEach((_,i)=>{const id=i+1;const btn=document.createElement('button');btn.id=`sw_${id}`;btn.onclick=()=>fetch('/api/toggle',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({switch_id:id})}).then(refresh);b.appendChild(btn);});
+const c=document.getElementById('currents');
+Object.entries(s.output_currents).forEach(([k,val])=>{const row=document.createElement('div');row.style.margin='5px 0';row.innerHTML=`<label>Output ${k}</label><input step='0.1' min='0' max='25.5' type='number' id='out_${k}' value='${Number(val).toFixed(1)}'><button id='apply_${k}'>Apply</button>`;row.querySelector('button').onclick=()=>{const amps=parseFloat(document.getElementById(`out_${k}`).value||'0');fetch('/api/output_current',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({output_index:Number(k),amps:amps})}).then(refresh)};c.appendChild(row);});
+uiInit=true;
+}
+async function refresh(){const s=await (await fetch('/api/state')).json();const l=await (await fetch('/api/logs')).json();ensureUi(s);
+const st=s.switch_states.map((v,i)=>`S${i+1}: ${v?'ON':'OFF'}`).join(' | ');document.getElementById('states').innerText=`DIP: ${s.czone_dip_switch}   ${st}`;
+const mapLines=Object.entries(s.mappings).map(([kbd,m])=>`KBD ${kbd}: `+Object.entries(m).map(([k,v])=>`${k}->${v}`).join(', '));document.getElementById('mapping').innerText='Mappings:\\n'+mapLines.join('\\n');
+s.switch_states.forEach((v,i)=>{const id=i+1;const btn=document.getElementById(`sw_${id}`);btn.className=v?'on':'off';btn.textContent=`Toggle S${id} (${v?'ON':'OFF'})`;});
+Object.entries(s.output_currents).forEach(([k,val])=>{const input=document.getElementById(`out_${k}`);if(document.activeElement!==input){input.value=Number(val).toFixed(1);}});
+document.getElementById('logs').textContent=(l.logs||[]).slice(-50).join('\\n');}
+setInterval(refresh,1000);refresh();
+</script></body></html>
+"""
+
+        @self.app.get('/api/state')
+        def state():
+            return jsonify({
+                'switch_states': self.czone.get_switch_states(),
+                'czone_dip_switch': self.czone.czone_dip_switch,
+                'output_currents': {
+                    str(output_index): self.czone.get_output_current(output_index)
+                    for output_index in range(1, ADJUSTABLE_OUTPUT_COUNT + 1)
+                },
+                'mappings': {
+                    str(keyboard_id): {f"0x{k:02X}": v for k, v in sorted(mapping.items())}
+                    for keyboard_id, mapping in sorted(self.czone.keyboard_switch_maps.items())
+                },
+            })
+
+        @self.app.post('/api/toggle')
+        def toggle():
+            payload = request.get_json(silent=True) or {}
+            switch_id = int(payload.get('switch_id', 0))
+            if not (1 <= switch_id <= 4):
+                return jsonify({'error': 'switch_id must be 1..4'}), 400
+            current = self.czone.get_switch_states()[switch_id - 1]
+            updated = self.czone._set_switch(0x04 + switch_id, not current)
+            self.logger.log(f"Web switch {switch_id} -> {'ON' if updated else 'OFF'}")
+            if self.czone.on_switch_event:
+                self.czone.on_switch_event(0x04 + switch_id, updated)
+            self.czone.heartbeat()
+            self.czone.detailed_status()
+            return jsonify({'switch_id': switch_id, 'is_on': updated})
+
+        @self.app.post('/api/output_current')
+        def set_output_current():
+            payload = request.get_json(silent=True) or {}
+            output_index = int(payload.get('output_index', 0))
+            amps = float(payload.get('amps', 0.0))
+            if not (1 <= output_index <= ADJUSTABLE_OUTPUT_COUNT):
+                return jsonify({'error': f'output_index must be 1..{ADJUSTABLE_OUTPUT_COUNT}'}), 400
+            self.czone.set_output_current(output_index, amps)
+            normalized = self.czone.get_output_current(output_index)
+            self.logger.log(f"Web output {output_index} current -> {normalized:.1f} A")
+            self.czone.detailed_status()
+            return jsonify({'output_index': output_index, 'amps': normalized})
+
+        @self.app.get('/api/logs')
+        def logs():
+            return jsonify({'logs': self.logger.get_entries()})
+
+    def run(self):
+        self.logger.log(f'Web server listening on http://{self.host}:{self.port}')
+        self.app.run(host=self.host, port=self.port, debug=False, use_reloader=False)
 
 
 class CZoneGui:
@@ -947,8 +1075,9 @@ class CZoneGui:
 
 
 class CZoneHeadless:
-    def __init__(self, czone: CZone, modbus_port: str, modbus_baudrate: int):
+    def __init__(self, czone: CZone, logger: AppLogger, modbus_port: str, modbus_baudrate: int):
         self.czone = czone
+        self.logger = logger
         self.modbus_bridge = ModbusBreakerBridge(port=modbus_port, baudrate=modbus_baudrate)
         self.modbus_enabled = True
         self.modbus_requests: Queue = Queue()
@@ -998,12 +1127,12 @@ class CZoneHeadless:
 
             kind = event[0]
             if kind == "error":
-                print(event[1])
+                self.logger.log(event[1])
                 continue
             if kind == "write_ack":
                 _, switch_id, is_on, ok = event
                 if not ok:
-                    print(f"Modbus write failed for breaker {switch_id}")
+                    self.logger.log(f"Modbus write failed for breaker {switch_id}")
                 continue
             _, switch_id, value = event
             if value is None:
@@ -1022,7 +1151,7 @@ class CZoneHeadless:
             after = self.czone._set_switch(0x04 + switch_id, is_on)
             if after != before:
                 source_state = {1: "OPEN", 2: "CLOSED", 3: "TRIPPED/LOCKED"}.get(value, f"RAW={value}")
-                print(f"Modbus breaker {switch_id} status -> {source_state}")
+                self.logger.log(f"Modbus breaker {switch_id} status -> {source_state}")
                 self.czone.heartbeat()
                 self.czone.detailed_status()
 
@@ -1042,7 +1171,7 @@ class CZoneHeadless:
             before = bool(self.czone.state & (1 << (switch_id - 1)))
             after = self.czone._set_switch(0x04 + switch_id, final_state)
             if after != before:
-                print(f"Modbus timeout on breaker {switch_id}; final virtual state {'ON' if after else 'OFF'}")
+                self.logger.log(f"Modbus timeout on breaker {switch_id}; final virtual state {'ON' if after else 'OFF'}")
                 self.czone.heartbeat()
                 self.czone.detailed_status()
 
@@ -1055,11 +1184,11 @@ class CZoneHeadless:
     def record_switch_event(self, switch_code: int, is_on: bool):
         switch_id = (switch_code - 0x05) + 1
         state_text = "ON" if is_on else "OFF"
-        print(f"Switch {switch_id} (code 0x{switch_code:02X}) -> {state_text}")
+        self.logger.log(f"Switch {switch_id} (code 0x{switch_code:02X}) -> {state_text}")
         self._send_modbus_command(switch_id, is_on)
 
     def run(self):
-        print("CZone emulator headless mode running...")
+        self.logger.log("CZone emulator headless mode running...")
         self.czone.address_claim()
         self.czone.product_information()
         while True:
@@ -1112,7 +1241,20 @@ def main():
     )
 
     try:
-        czone = CZone(transport)
+        logger = AppLogger()
+        czone = CZone(transport, logger=logger)
+        web_thread = None
+        web_server = None
+        headless = os.getenv("HEADLESS", "").strip().lower() in {"1", "true", "yes"}
+        if platform.system() == "Linux" and not os.getenv("DISPLAY"):
+            headless = True
+        print(f"Startup UI mode: {'headless' if headless else 'gui'}")
+        if headless:
+            web_host = os.getenv("WEB_HOST", "0.0.0.0")
+            web_port = int(os.getenv("WEB_PORT", "8080"))
+            web_server = CZoneWebServer(czone, logger=logger, host=web_host, port=web_port)
+            web_thread = threading.Thread(target=web_server.run, daemon=True)
+            web_thread.start()
         # Push presence/status frames immediately after CAN open so reconnects do not
         # wait for GUI initialization timing.
         for _ in range(3):
@@ -1122,13 +1264,8 @@ def main():
             czone.detailed_status()
             time.sleep(0.1)
 
-        headless = os.getenv("HEADLESS", "").strip().lower() in {"1", "true", "yes"}
-        if platform.system() == "Linux" and not os.getenv("DISPLAY"):
-            headless = True
-        print(f"Startup UI mode: {'headless' if headless else 'gui'}")
-
         if headless:
-            app = CZoneHeadless(czone, modbus_port=resolved_port, modbus_baudrate=modbus_baudrate)
+            app = CZoneHeadless(czone, logger=logger, modbus_port=resolved_port, modbus_baudrate=modbus_baudrate)
         else:
             app = CZoneGui(czone, modbus_port=resolved_port, modbus_baudrate=modbus_baudrate)
         try:
