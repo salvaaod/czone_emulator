@@ -68,6 +68,7 @@ MODBUS_INTER_FRAME_GAP_SECONDS = 0.005
 KEYBOARD_SWITCH_MAPS = {
     1:   {0x09: 1, 0x0A: 2, 0x0B: 3, 0x0C: 4},
     192: {0x09: 1, 0x0A: 2, 0x0B: 3, 0x0C: 4},
+    32:  {0x09: 1, 0x0A: 2, 0x0B: 3, 0x0C: 4},
 }
 
 # ---------------- CAN STRUCTS ----------------
