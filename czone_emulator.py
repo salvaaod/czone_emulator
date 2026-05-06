@@ -1250,7 +1250,8 @@ def main():
         if platform.system() == "Linux" and not os.getenv("DISPLAY"):
             headless = True
         print(f"Startup UI mode: {'headless' if headless else 'gui'}")
-        if headless:
+        web_enabled = headless or os.getenv("WEB_SERVER", "").strip().lower() in {"1", "true", "yes"}
+        if web_enabled:
             web_host = os.getenv("WEB_HOST", "0.0.0.0")
             web_port = int(os.getenv("WEB_PORT", "8080"))
             web_server = CZoneWebServer(czone, logger=logger, host=web_host, port=web_port)

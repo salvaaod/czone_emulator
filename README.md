@@ -128,13 +128,14 @@ Then open: `http://<host>:8080/`
 
 ## UI/Web settings
 
-- `HEADLESS`: `1/true/yes` to force headless mode.
-- `WEB_HOST`: Flask bind host in headless mode (default `0.0.0.0`).
-- `WEB_PORT`: Flask bind port in headless mode (default `8080`).
+- `HEADLESS`: `1/true/yes` to force headless mode without the Tkinter GUI. Headless mode also starts the Flask web UI/API.
+- `WEB_SERVER`: `1/true/yes` to enable the Flask web UI/API even when GUI mode is active.
+- `WEB_HOST`: Flask bind host when the web server is enabled (default `0.0.0.0`).
+- `WEB_PORT`: Flask bind port when the web server is enabled (default `8080`).
 
 ## Headless HTTP API
 
-When in headless mode:
+When the web server is enabled (by `HEADLESS=1`, Linux without `DISPLAY`, or `WEB_SERVER=1`):
 
 - `GET /api/state`
   - Returns switch states, DIP switch value, adjustable output currents, and keyboard mappings.
