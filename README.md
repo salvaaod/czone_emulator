@@ -137,13 +137,16 @@ Then open: `http://<host>:8080/`
 When in headless mode:
 
 - `GET /api/state`
-  - Returns switch states, DIP switch value, adjustable output currents, and keyboard mappings.
+  - Returns switch states, DIP switch value, CZone message identifier, adjustable output currents, and keyboard mappings.
 - `POST /api/toggle`
   - JSON: `{ "switch_id": 1..4 }`
   - Toggles a switch and returns updated state.
 - `POST /api/output_current`
   - JSON: `{ "output_index": 1..4, "amps": <float> }`
   - Sets output current (quantized to 0.1 A, clamped to supported range).
+- `POST /api/czone_message`
+  - JSON: `{ "czone_message": "0xFD0F" }`
+  - Changes the 16-bit CZone message identifier used by CZone TX/RX frames. Hex values may include or omit the `0x` prefix.
 - `GET /api/logs`
   - Returns recent log entries.
 
