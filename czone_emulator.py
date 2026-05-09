@@ -77,8 +77,6 @@ KEYBOARD_SWITCH_MAPS = {
 
 RUNTIME_CONFIG_FILENAME = "czone_runtime_config.json"
 RUNTIME_CONFIG_FIELDS = {
-    "n2k_device_function": {"global": "N2K_DEVICE_FUNCTION", "min": 0, "max": 255},
-    "n2k_device_class": {"global": "N2K_DEVICE_CLASS", "min": 0, "max": 127},
     "czone_heartbeat_type": {"global": "CZONE_HEARTBEAT_TYPE", "min": 0, "max": 255},
 }
 
@@ -818,7 +816,7 @@ class CZoneWebServer:
 <div class='card'><div id='states'></div><div id='mapping'></div></div>
 <div class='card'><h3>Switches</h3><div id='buttons'></div></div>
 <div class='card'><h3>Output currents (A)</h3><div id='currents'></div></div>
-<div class='card'><h3>Runtime identity settings</h3><p>Apply saves these values and restarts the emulator so NMEA identity and heartbeat frames use them.</p><div id='runtime_config'></div><button id='apply_runtime_config'>Apply and reload app</button></div>
+<div class='card'><h3>CZone heartbeat setting</h3><p>Apply saves this value and restarts the emulator so heartbeat frames use it.</p><div id='runtime_config'></div><button id='apply_runtime_config'>Apply and reload app</button></div>
 <div class='card'><h3>Logs</h3><pre id='logs'></pre></div>
 <script>
 let uiInit=false;
@@ -829,7 +827,7 @@ s.switch_states.forEach((_,i)=>{const id=i+1;const btn=document.createElement('b
 const c=document.getElementById('currents');
 Object.entries(s.output_currents).forEach(([k,val])=>{const row=document.createElement('div');row.style.margin='5px 0';row.innerHTML=`<label>Output ${k}</label><input step='0.1' min='0' max='25.5' type='number' id='out_${k}' value='${Number(val).toFixed(1)}'><button id='apply_${k}'>Apply</button>`;row.querySelector('button').onclick=()=>{const amps=parseFloat(document.getElementById(`out_${k}`).value||'0');fetch('/api/output_current',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({output_index:Number(k),amps:amps})}).then(refresh)};c.appendChild(row);});
 const cfg=document.getElementById('runtime_config');
-const fields=[['n2k_device_function','NMEA device function',0,255],['n2k_device_class','NMEA device class',0,127],['czone_heartbeat_type','CZone heartbeat type',0,255]];
+const fields=[['czone_heartbeat_type','CZone heartbeat type',0,255]];
 fields.forEach(([key,label,min,max])=>{const row=document.createElement('div');row.style.margin='5px 0';const val=s.runtime_config[key];row.innerHTML=`<label>${label}</label><input type='text' id='cfg_${key}' value='${val}'><span style='margin-left:6px;color:#555' id='cfg_${key}_hex'>0x${Number(val).toString(16).toUpperCase().padStart(2,'0')}</span>`;cfg.appendChild(row);});
 document.getElementById('apply_runtime_config').onclick=async()=>{const body={};fields.forEach(([key])=>{body[key]=document.getElementById(`cfg_${key}`).value;});const resp=await fetch('/api/runtime_config',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(body)});if(!resp.ok){const err=await resp.json();alert(err.error||'Runtime config update failed');return;}setTimeout(()=>location.reload(),1500);};
 uiInit=true;
@@ -869,7 +867,7 @@ setInterval(refresh,1000);refresh();
             except (TypeError, ValueError) as exc:
                 return jsonify({'error': str(exc)}), 400
             self.logger.log(
-                "Web runtime config updated; restarting: "
+                "Web CZone heartbeat setting updated; restarting: "
                 + ", ".join(f"{name}={value}" for name, value in normalized.items())
             )
             schedule_restart()
@@ -969,12 +967,10 @@ class CZoneGui:
             spin.bind("<FocusOut>", lambda _, idx=output_index: self.apply_output_current(idx))
             self.current_vars[output_index] = var
 
-        config_frame = tk.LabelFrame(self.root, text="Runtime identity settings")
+        config_frame = tk.LabelFrame(self.root, text="CZone heartbeat setting")
         config_frame.pack(pady=(0, 12), padx=8, fill="x")
         self.runtime_config_vars = {}
         config_rows = (
-            ("n2k_device_function", "NMEA device function"),
-            ("n2k_device_class", "NMEA device class"),
             ("czone_heartbeat_type", "CZone heartbeat type"),
         )
         config = current_runtime_config()
@@ -1122,7 +1118,7 @@ class CZoneGui:
         try:
             normalized = save_runtime_config(raw_values)
         except (TypeError, ValueError) as exc:
-            self.append_log(f"Invalid runtime identity settings: {exc}")
+            self.append_log(f"Invalid CZone heartbeat setting: {exc}")
             config = current_runtime_config()
             for key, var in self.runtime_config_vars.items():
                 var.set(str(config[key]))
@@ -1130,7 +1126,7 @@ class CZoneGui:
         for key, var in self.runtime_config_vars.items():
             var.set(str(normalized[key]))
         self.append_log(
-            "Runtime identity settings updated; restarting app: "
+            "CZone heartbeat setting updated; restarting app: "
             + ", ".join(f"{name}={value}" for name, value in normalized.items())
         )
         self.root.after(200, restart_process)
