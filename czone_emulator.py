@@ -101,6 +101,10 @@ def current_runtime_config() -> dict[str, int]:
     return {name: int(globals()[field["global"]]) for name, field in RUNTIME_CONFIG_FIELDS.items()}
 
 
+def format_runtime_config_value(value: int) -> str:
+    return f"0x{int(value) & 0xFF:02X}"
+
+
 def load_runtime_config():
     path = _runtime_config_path()
     if not os.path.exists(path):
@@ -816,7 +820,7 @@ class CZoneWebServer:
 <div class='card'><div id='states'></div><div id='mapping'></div></div>
 <div class='card'><h3>Switches</h3><div id='buttons'></div></div>
 <div class='card'><h3>Output currents (A)</h3><div id='currents'></div></div>
-<div class='card'><h3>CZone heartbeat setting</h3><p>Apply saves this value and restarts the emulator so heartbeat frames use it.</p><div id='runtime_config'></div><button id='apply_runtime_config'>Apply and reload app</button></div>
+<div class='card'><h3>CZone heartbeat setting</h3><p>Enter a hex byte such as 0x0F or 0x36. Decimal values are also accepted. Apply saves the value and restarts the emulator so heartbeat frames use it.</p><div id='runtime_config'></div><button id='apply_runtime_config'>Apply and reload app</button></div>
 <div class='card'><h3>Logs</h3><pre id='logs'></pre></div>
 <script>
 let uiInit=false;
@@ -828,7 +832,7 @@ const c=document.getElementById('currents');
 Object.entries(s.output_currents).forEach(([k,val])=>{const row=document.createElement('div');row.style.margin='5px 0';row.innerHTML=`<label>Output ${k}</label><input step='0.1' min='0' max='25.5' type='number' id='out_${k}' value='${Number(val).toFixed(1)}'><button id='apply_${k}'>Apply</button>`;row.querySelector('button').onclick=()=>{const amps=parseFloat(document.getElementById(`out_${k}`).value||'0');fetch('/api/output_current',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({output_index:Number(k),amps:amps})}).then(refresh)};c.appendChild(row);});
 const cfg=document.getElementById('runtime_config');
 const fields=[['czone_heartbeat_type','CZone heartbeat type',0,255]];
-fields.forEach(([key,label,min,max])=>{const row=document.createElement('div');row.style.margin='5px 0';const val=s.runtime_config[key];row.innerHTML=`<label>${label}</label><input type='text' id='cfg_${key}' value='${val}'><span style='margin-left:6px;color:#555' id='cfg_${key}_hex'>0x${Number(val).toString(16).toUpperCase().padStart(2,'0')}</span>`;cfg.appendChild(row);});
+fields.forEach(([key,label,min,max])=>{const row=document.createElement('div');row.style.margin='5px 0';const val=s.runtime_config[key];const hexVal=`0x${Number(val).toString(16).toUpperCase().padStart(2,'0')}`;row.innerHTML=`<label>${label}</label><input type='text' id='cfg_${key}' value='${hexVal}'><span style='margin-left:6px;color:#555' id='cfg_${key}_hex'>${Number(val)} decimal</span>`;cfg.appendChild(row);});
 document.getElementById('apply_runtime_config').onclick=async()=>{const body={};fields.forEach(([key])=>{body[key]=document.getElementById(`cfg_${key}`).value;});const resp=await fetch('/api/runtime_config',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(body)});if(!resp.ok){const err=await resp.json();alert(err.error||'Runtime config update failed');return;}setTimeout(()=>location.reload(),1500);};
 uiInit=true;
 }
@@ -837,7 +841,7 @@ const st=s.switch_states.map((v,i)=>`S${i+1}: ${v?'ON':'OFF'}`).join(' | ');docu
 const mapLines=Object.entries(s.mappings).map(([kbd,m])=>`KBD ${kbd}: `+Object.entries(m).map(([k,v])=>`${k}->${v}`).join(', '));document.getElementById('mapping').innerText='Mappings:\\n'+mapLines.join('\\n');
 s.switch_states.forEach((v,i)=>{const id=i+1;const btn=document.getElementById(`sw_${id}`);btn.className=v?'on':'off';btn.textContent=`Toggle S${id} (${v?'ON':'OFF'})`;});
 Object.entries(s.output_currents).forEach(([k,val])=>{const input=document.getElementById(`out_${k}`);if(document.activeElement!==input){input.value=Number(val).toFixed(1);}});
-Object.entries(s.runtime_config).forEach(([k,val])=>{const input=document.getElementById(`cfg_${k}`);const hex=document.getElementById(`cfg_${k}_hex`);if(input&&document.activeElement!==input){input.value=val;}if(hex){hex.textContent=`0x${Number(input?input.value:val).toString(16).toUpperCase().padStart(2,'0')}`;}});
+Object.entries(s.runtime_config).forEach(([k,val])=>{const input=document.getElementById(`cfg_${k}`);const hint=document.getElementById(`cfg_${k}_hex`);const hexVal=`0x${Number(val).toString(16).toUpperCase().padStart(2,'0')}`;if(input&&document.activeElement!==input){input.value=hexVal;}if(hint){hint.textContent=`${Number(val)} decimal`;}});
 document.getElementById('logs').textContent=(l.logs||[]).slice(-50).join('\\n');}
 setInterval(refresh,1000);refresh();
 </script></body></html>
@@ -978,9 +982,9 @@ class CZoneGui:
             row = tk.Frame(config_frame)
             row.pack(fill="x", padx=6, pady=2)
             tk.Label(row, text=label, width=22, anchor="w").pack(side="left")
-            var = tk.StringVar(value=str(config[key]))
+            var = tk.StringVar(value=format_runtime_config_value(config[key]))
             tk.Entry(row, textvariable=var, width=8).pack(side="left", padx=(0, 6))
-            tk.Label(row, text=f"0x{config[key]:02X}", width=6, anchor="w").pack(side="left")
+            tk.Label(row, text=f"{config[key]} decimal", width=10, anchor="w").pack(side="left")
             self.runtime_config_vars[key] = var
         tk.Button(config_frame, text="Apply and reload app", command=self.apply_runtime_config).pack(
             pady=(4, 6)
@@ -1121,10 +1125,10 @@ class CZoneGui:
             self.append_log(f"Invalid CZone heartbeat setting: {exc}")
             config = current_runtime_config()
             for key, var in self.runtime_config_vars.items():
-                var.set(str(config[key]))
+                var.set(format_runtime_config_value(config[key]))
             return
         for key, var in self.runtime_config_vars.items():
-            var.set(str(normalized[key]))
+            var.set(format_runtime_config_value(normalized[key]))
         self.append_log(
             "CZone heartbeat setting updated; restarting app: "
             + ", ".join(f"{name}={value}" for name, value in normalized.items())
