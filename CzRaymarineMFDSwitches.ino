@@ -41,6 +41,7 @@
 #define CzSwitchBank1SerialNum  0x1d // Serial Number switches 1-4 (00260128)
 #define CzSwitchBank2SerialNum  0x1b // Serial Number switches 5-8  (00260126)
 #define CzDipSwitch     200 //  CZone Dip switch value, CZone address
+#define CzHeartbeatValue 0x0A // CZone heartbeat value
 #define BinaryDeviceInstance 0x00 // Instance of 127501 switch state message
 #define SwitchBankInstance 0x00   //Instance of 127502 change switch state message
 #define NumberOfSwitches 8   // change to 4 for bit switch bank
@@ -179,7 +180,7 @@ void SetCZoneSwitchHeartbeat65284(unsigned char CzSwitchBankSerialNum) {
     if (CzConfigAuthenticated) {
 
         N2kMsg.AddByte(CzSwitchBankSerialNum);
-        N2kMsg.AddByte(0x0f); // ?
+        N2kMsg.AddByte(CzHeartbeatValue);
         if (CzSwitchBankSerialNum == CzSwitchBank1SerialNum)
             N2kMsg.AddByte(CzSwitchState1);
         else N2kMsg.AddByte(CzSwitchState2);
@@ -187,7 +188,8 @@ void SetCZoneSwitchHeartbeat65284(unsigned char CzSwitchBankSerialNum) {
     else {   // if Switch bank is not authenticated, send following to MFD to prompt a 65290 from MFD
 
         N2kMsg.AddByte(0xFF);
-        N2kMsg.Add2ByteUInt(0x0f0f);
+        N2kMsg.AddByte(CzHeartbeatValue);
+        N2kMsg.AddByte(CzHeartbeatValue);
     }
     N2kMsg.Add2ByteUInt(0x0000);
     N2kMsg.AddByte(0x00);
