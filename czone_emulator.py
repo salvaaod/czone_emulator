@@ -35,6 +35,7 @@ PGN_130817 = 130817
 
 CZONE_MESSAGE = 0x9927
 CZONE_DIP_SWITCH_DEFAULT = 2
+CZONE_HEARTBEAT_VALUE_DEFAULT = 0x0A
 
 N2K_UNIQUE_NUMBER = 123456
 N2K_MANUFACTURER_CODE = 295
@@ -386,13 +387,18 @@ class CZone:
     on_switch_event: Optional[Callable[[int, bool], None]] = None
     logger: Optional["AppLogger"] = None
     czone_dip_switch: int = CZONE_DIP_SWITCH_DEFAULT
+    heartbeat_value: int = CZONE_HEARTBEAT_VALUE_DEFAULT
     pending_commands: dict[int, int] | None = None
     keyboard_switch_maps: dict[int, dict[int, int]] | None = None
 
     def __post_init__(self):
         self.czone_dip_switch = self._normalize_byte(self.czone_dip_switch)
+        self.heartbeat_value = self._normalize_byte(self.heartbeat_value)
         self._log("CZone startup: pre-authenticated for immediate display sync")
-        self._log(f"Identity: NMEA2000 SRC={SRC}, CZone DIP Switch={self.czone_dip_switch}")
+        self._log(
+            f"Identity: NMEA2000 SRC={SRC}, CZone DIP Switch={self.czone_dip_switch}, "
+            f"Heartbeat Value=0x{self.heartbeat_value:02X}"
+        )
         if self.pending_commands is None:
             self.pending_commands = {}
         if self.keyboard_switch_maps is None:
@@ -477,9 +483,21 @@ class CZone:
 
     def heartbeat(self):
         if self.authenticated:
-            data = u16(CZONE_MESSAGE) + bytes([self.czone_dip_switch, 0x0F, self.state, 0x00, 0x00, 0x00])
+            data = u16(CZONE_MESSAGE) + bytes([
+                self.czone_dip_switch,
+                self.heartbeat_value,
+                self.state,
+                0x00,
+                0x00,
+                0x00,
+            ])
         else:
-            data = u16(CZONE_MESSAGE) + bytes([0xFF]) + u16(0x0F0F) + u16(0) + bytes([0])
+            data = (
+                u16(CZONE_MESSAGE)
+                + bytes([0xFF, self.heartbeat_value, self.heartbeat_value])
+                + u16(0)
+                + bytes([0])
+            )
 
         self.send(PGN_65284, data)
 
