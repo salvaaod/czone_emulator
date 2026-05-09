@@ -1,3 +1,4 @@
+import argparse
 import ctypes
 from errno import ENOBUFS
 import os
@@ -72,6 +73,29 @@ KEYBOARD_SWITCH_MAPS = {
     32:  {0x09: 1, 0x0A: 2, 0x0B: 3, 0x0C: 4},
 #   255: {0x09: 1, 0x0A: 2, 0x0B: 3, 0x0C: 4},
 }
+
+
+def parse_byte_arg(value: str) -> int:
+    try:
+        parsed = int(value, 0)
+    except ValueError as exc:
+        raise argparse.ArgumentTypeError(
+            f"must be a byte in decimal or hex form, for example 15 or 0x0F: {value}"
+        ) from exc
+    if not 0 <= parsed <= 0xFF:
+        raise argparse.ArgumentTypeError(f"must be between 0x00 and 0xFF: {value}")
+    return parsed
+
+
+def parse_startup_args(argv: list[str] | None = None):
+    parser = argparse.ArgumentParser(description="CZone NMEA2000 emulator")
+    parser.add_argument(
+        "--heart",
+        type=parse_byte_arg,
+        default=CZONE_HEARTBEAT_TYPE,
+        help="CZone heartbeat type byte to use at startup; accepts hex or decimal (default: 0x0F).",
+    )
+    return parser.parse_args(argv)
 
 
 # ---------------- CAN STRUCTS ----------------
@@ -1222,7 +1246,11 @@ class CZoneHeadless:
 # ---------------- MAIN ----------------
 
 
-def main():
+def main(argv: list[str] | None = None):
+    global CZONE_HEARTBEAT_TYPE
+    args = parse_startup_args(argv)
+    CZONE_HEARTBEAT_TYPE = args.heart
+
     runtime_dir = os.path.dirname(os.path.abspath(__file__))
     transport, can_details = select_can_transport(runtime_dir)
     current_os = can_details["os"]
@@ -1243,6 +1271,7 @@ def main():
         f"Startup serial selection: configured={configured_port}, resolved={resolved_port}, "
         f"baudrate={modbus_baudrate}"
     )
+    print(f"Startup CZone heartbeat type: 0x{CZONE_HEARTBEAT_TYPE:02X} ({CZONE_HEARTBEAT_TYPE})")
 
     try:
         logger = AppLogger()
