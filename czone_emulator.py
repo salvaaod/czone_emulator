@@ -28,6 +28,7 @@ SRC = 20
 PGN_60928 = 60928
 PGN_59904 = 59904
 PGN_65280 = 65280
+PGN_65283 = 65283
 PGN_65284 = 65284
 PGN_65290 = 65290
 PGN_126996 = 126996
@@ -35,6 +36,12 @@ PGN_130817 = 130817
 
 CZONE_MESSAGE = 0x9927
 CZONE_DIP_SWITCH_DEFAULT = 2
+CZONE_SWITCH_BANK_SERIAL_DEFAULT = 0x1D
+CZONE_130817_INSTANCE_DEFAULT = 0x01
+CZONE_65290_CONFIG0_DEFAULT = 0x00
+CZONE_65290_CONFIG1_DEFAULT = 0x00
+CZONE_65290_CONFIG2_DEFAULT = 0x00
+CZONE_DISPLAY_SYNC_ENABLED_DEFAULT = True
 
 N2K_UNIQUE_NUMBER = 123456
 N2K_MANUFACTURER_CODE = 295
@@ -360,26 +367,17 @@ def n2k_string_field(text: str, field_len: int = 32) -> bytes:
     return raw + b"\x00" + (b"\xFF" * (field_len - len(raw) - 1))
 
 
-def encode_iso_name(
-    unique_number: int,
-    manufacturer_code: int,
-    device_instance_lower: int,
-    device_instance_upper: int,
-    device_function: int,
-    device_class: int,
-    system_instance: int,
-    industry_group: int,
-) -> bytes:
+def encode_iso_name() -> bytes:
     value = 0
-    value |= unique_number & 0x1FFFFF
-    value |= (manufacturer_code & 0x7FF) << 21
-    value |= (device_instance_lower & 0x07) << 32
-    value |= (device_instance_upper & 0x1F) << 35
-    value |= (device_function & 0xFF) << 40
+    value |= N2K_UNIQUE_NUMBER & 0x1FFFFF
+    value |= (N2K_MANUFACTURER_CODE & 0x7FF) << 21
+    value |= (N2K_DEVICE_INSTANCE_LOWER & 0x07) << 32
+    value |= (N2K_DEVICE_INSTANCE_UPPER & 0x1F) << 35
+    value |= (N2K_DEVICE_FUNCTION & 0xFF) << 40
     value |= 0 << 48  # Reserved
-    value |= (device_class & 0x7F) << 49
-    value |= (system_instance & 0x0F) << 56
-    value |= (industry_group & 0x07) << 60
+    value |= (N2K_DEVICE_CLASS & 0x7F) << 49
+    value |= (N2K_SYSTEM_INSTANCE & 0x0F) << 56
+    value |= (N2K_INDUSTRY_GROUP & 0x07) << 60
     value |= 1 << 63  # Reserved bit
     return value.to_bytes(8, "little")
 
@@ -395,34 +393,22 @@ class CZone:
     on_switch_event: Optional[Callable[[int, bool], None]] = None
     logger: Optional["AppLogger"] = None
     czone_dip_switch: int = CZONE_DIP_SWITCH_DEFAULT
-    src: int = SRC
-    n2k_unique_number: int = N2K_UNIQUE_NUMBER
-    n2k_manufacturer_code: int = N2K_MANUFACTURER_CODE
-    n2k_device_instance_lower: int = N2K_DEVICE_INSTANCE_LOWER
-    n2k_device_instance_upper: int = N2K_DEVICE_INSTANCE_UPPER
-    n2k_device_function: int = N2K_DEVICE_FUNCTION
-    n2k_device_class: int = N2K_DEVICE_CLASS
-    n2k_system_instance: int = N2K_SYSTEM_INSTANCE
-    n2k_industry_group: int = N2K_INDUSTRY_GROUP
-    n2k_db_version: int = N2K_DB_VERSION
-    n2k_certification_level: int = N2K_CERTIFICATION_LEVEL
-    n2k_load_equivalency: int = N2K_LOAD_EQUIVALENCY
-    n2k_manufacturer_product_code: int = N2K_MANUFACTURER_PRODUCT_CODE
-    n2k_model_id: str = N2K_MODEL_ID
-    n2k_software_id: str = N2K_SOFTWARE_ID
-    n2k_hardware_id: str = N2K_HARDWARE_ID
-    n2k_serial_id: str = N2K_SERIAL_ID
+    czone_switch_bank_serial: int = CZONE_SWITCH_BANK_SERIAL_DEFAULT
+    czone_130817_instance: int = CZONE_130817_INSTANCE_DEFAULT
+    czone_65290_config0: int = CZONE_65290_CONFIG0_DEFAULT
+    czone_65290_config1: int = CZONE_65290_CONFIG1_DEFAULT
+    czone_65290_config2: int = CZONE_65290_CONFIG2_DEFAULT
+    czone_display_sync_enabled: bool = CZONE_DISPLAY_SYNC_ENABLED_DEFAULT
     pending_commands: dict[int, int] | None = None
     keyboard_switch_maps: dict[int, dict[int, int]] | None = None
 
     def __post_init__(self):
-        self.czone_dip_switch = self._normalize_byte(self.czone_dip_switch)
-        self._normalize_n2k_identity()
+        self._normalize_czone_config()
         self._log("CZone startup: pre-authenticated for immediate display sync")
         self._log(
-            f"Identity: NMEA2000 SRC={self.src}, CZone DIP Switch={self.czone_dip_switch}, "
-            f"manufacturer={self.n2k_manufacturer_code}, function={self.n2k_device_function}, "
-            f"class={self.n2k_device_class}, product={self.n2k_manufacturer_product_code}"
+            f"Identity: NMEA2000 SRC={SRC}, CZone DIP Switch={self.czone_dip_switch}, "
+            f"CZone bank serial=0x{self.czone_switch_bank_serial:02X}, "
+            f"65290 config={self.czone_65290_config0:02X} {self.czone_65290_config1:02X} {self.czone_65290_config2:02X}"
         )
         if self.pending_commands is None:
             self.pending_commands = {}
@@ -448,63 +434,51 @@ class CZone:
     def _normalize_range(value: int, minimum: int, maximum: int) -> int:
         return max(minimum, min(maximum, int(value)))
 
-    def _normalize_n2k_identity(self):
-        self.src = self._normalize_byte(self.src)
-        self.n2k_unique_number = self._normalize_range(self.n2k_unique_number, 0, 0x1FFFFF)
-        self.n2k_manufacturer_code = self._normalize_range(self.n2k_manufacturer_code, 0, 0x7FF)
-        self.n2k_device_instance_lower = self._normalize_range(self.n2k_device_instance_lower, 0, 0x07)
-        self.n2k_device_instance_upper = self._normalize_range(self.n2k_device_instance_upper, 0, 0x1F)
-        self.n2k_device_function = self._normalize_byte(self.n2k_device_function)
-        self.n2k_device_class = self._normalize_range(self.n2k_device_class, 0, 0x7F)
-        self.n2k_system_instance = self._normalize_range(self.n2k_system_instance, 0, 0x0F)
-        self.n2k_industry_group = self._normalize_range(self.n2k_industry_group, 0, 0x07)
-        self.n2k_db_version = self._normalize_u16(self.n2k_db_version)
-        self.n2k_certification_level = self._normalize_byte(self.n2k_certification_level)
-        self.n2k_load_equivalency = self._normalize_byte(self.n2k_load_equivalency)
-        self.n2k_manufacturer_product_code = self._normalize_u16(self.n2k_manufacturer_product_code)
-        self.n2k_model_id = str(self.n2k_model_id)
-        self.n2k_software_id = str(self.n2k_software_id)
-        self.n2k_hardware_id = str(self.n2k_hardware_id)
-        self.n2k_serial_id = str(self.n2k_serial_id)
+    def _normalize_czone_config(self):
+        self.czone_dip_switch = self._normalize_byte(self.czone_dip_switch)
+        self.czone_switch_bank_serial = self._normalize_byte(self.czone_switch_bank_serial)
+        self.czone_130817_instance = self._normalize_byte(self.czone_130817_instance)
+        self.czone_65290_config0 = self._normalize_byte(self.czone_65290_config0)
+        self.czone_65290_config1 = self._normalize_byte(self.czone_65290_config1)
+        self.czone_65290_config2 = self._normalize_byte(self.czone_65290_config2)
+        self.czone_display_sync_enabled = bool(self.czone_display_sync_enabled)
 
-    def get_n2k_identity(self) -> dict[str, int | str]:
+    def get_czone_config(self) -> dict[str, int | bool]:
         return {
-            "src": self.src,
-            "unique_number": self.n2k_unique_number,
-            "manufacturer_code": self.n2k_manufacturer_code,
-            "device_instance_lower": self.n2k_device_instance_lower,
-            "device_instance_upper": self.n2k_device_instance_upper,
-            "device_function": self.n2k_device_function,
-            "device_class": self.n2k_device_class,
-            "system_instance": self.n2k_system_instance,
-            "industry_group": self.n2k_industry_group,
-            "db_version": self.n2k_db_version,
-            "manufacturer_product_code": self.n2k_manufacturer_product_code,
-            "model_id": self.n2k_model_id,
-            "software_id": self.n2k_software_id,
-            "hardware_id": self.n2k_hardware_id,
-            "serial_id": self.n2k_serial_id,
-            "certification_level": self.n2k_certification_level,
-            "load_equivalency": self.n2k_load_equivalency,
+            "dip_switch": self.czone_dip_switch,
+            "switch_bank_serial": self.czone_switch_bank_serial,
+            "instance_130817": self.czone_130817_instance,
+            "config0_65290": self.czone_65290_config0,
+            "config1_65290": self.czone_65290_config1,
+            "config2_65290": self.czone_65290_config2,
+            "display_sync_enabled": self.czone_display_sync_enabled,
         }
 
-    def update_n2k_identity(self, values: dict[str, int | str]) -> dict[str, int | str]:
-        integer_fields = set(self.get_n2k_identity()) - {"model_id", "software_id", "hardware_id", "serial_id"}
-        string_fields = {"model_id", "software_id", "hardware_id", "serial_id"}
+    def update_czone_config(self, values: dict[str, int | bool]) -> dict[str, int | bool]:
+        fields = {
+            "dip_switch": "czone_dip_switch",
+            "switch_bank_serial": "czone_switch_bank_serial",
+            "instance_130817": "czone_130817_instance",
+            "config0_65290": "czone_65290_config0",
+            "config1_65290": "czone_65290_config1",
+            "config2_65290": "czone_65290_config2",
+            "display_sync_enabled": "czone_display_sync_enabled",
+        }
         for field, value in values.items():
-            if field in integer_fields:
-                setattr(self, f"n2k_{field}" if field != "src" else "src", int(value))
-            elif field in string_fields:
-                setattr(self, f"n2k_{field}", str(value))
+            attr = fields.get(field)
+            if attr is None:
+                raise ValueError(f"Unsupported CZone config field: {field}")
+            if field == "display_sync_enabled":
+                setattr(self, attr, bool(value))
             else:
-                raise ValueError(f"Unsupported NMEA 2000 identity field: {field}")
-        self._normalize_n2k_identity()
-        identity = self.get_n2k_identity()
+                setattr(self, attr, int(value))
+        self._normalize_czone_config()
+        config = self.get_czone_config()
         self._log(
-            "NMEA 2000 identity updated: "
-            + ", ".join(f"{key}={value}" for key, value in identity.items())
+            "CZone config updated: "
+            + ", ".join(f"{key}={value}" for key, value in config.items())
         )
-        return identity
+        return config
 
     def set_output_current_tenths(self, output_index: int, value: int):
         if not (1 <= output_index <= OUTPUT_COUNT):
@@ -539,7 +513,7 @@ class CZone:
 
     def send(self, pgn, data, priority=7):
         try:
-            self.dev.send(n2k_id(priority, pgn, self.src), data)
+            self.dev.send(n2k_id(priority, pgn, SRC), data)
         except Exception as exc:
             self._log(f"CAN TX failed for PGN {pgn}: {exc}")
 
@@ -574,7 +548,7 @@ class CZone:
 
     def heartbeat(self):
         if self.authenticated:
-            data = u16(CZONE_MESSAGE) + bytes([self.czone_dip_switch, 0x0F, self.state, 0x00, 0x00, 0x00])
+            data = u16(CZONE_MESSAGE) + bytes([self.czone_switch_bank_serial, 0x0F, self.state, 0x00, 0x00, 0x00])
         else:
             data = u16(CZONE_MESSAGE) + bytes([0xFF]) + u16(0x0F0F) + u16(0) + bytes([0])
 
@@ -585,7 +559,7 @@ class CZone:
         # Current mapping discovered from bench testing:
         # O1 -> block1 b0, O2 -> block1 b3, O3 -> block2 b2, O4 -> block3 b1,
         # then +3 byte stride for outputs 5 and 6.
-        payload = bytearray(u16(CZONE_MESSAGE) + bytes([0x00, self.czone_dip_switch]))
+        payload = bytearray(u16(CZONE_MESSAGE) + bytes([self.czone_130817_instance, self.czone_switch_bank_serial]))
         output_bytes = bytearray([0x00, 0x00, 0x04, 0x00] * OUTPUT_COUNT)
 
         current_byte_positions = {1: 0, 2: 3, 3: 6, 4: 9, 5: 12, 6: 15}
@@ -603,32 +577,52 @@ class CZone:
                 + " ".join(f"O{i}={self.get_output_current(i):.1f}A" for i in range(1, ADJUSTABLE_OUTPUT_COUNT + 1))
             )
 
-    def address_claim(self):
-        self.send(
-            PGN_60928,
-            encode_iso_name(
-                self.n2k_unique_number,
-                self.n2k_manufacturer_code,
-                self.n2k_device_instance_lower,
-                self.n2k_device_instance_upper,
-                self.n2k_device_function,
-                self.n2k_device_class,
-                self.n2k_system_instance,
-                self.n2k_industry_group,
-            ),
-            priority=6,
+        self._log(
+            f"TX 130817 header: message=0x{CZONE_MESSAGE:04X}, "
+            f"instance=0x{self.czone_130817_instance:02X}, serial=0x{self.czone_switch_bank_serial:02X}"
         )
+
+    def _display_sync_state(self) -> int:
+        display_state = 0
+        display_bit_positions = {1: 0, 2: 2, 3: 4, 4: 6}
+        for switch_id, bit_position in display_bit_positions.items():
+            if self.state & (1 << (switch_id - 1)):
+                display_state |= 1 << bit_position
+        return display_state
+
+    def display_sync_status(self):
+        if not self.czone_display_sync_enabled:
+            return
+        data = (
+            u16(CZONE_MESSAGE)
+            + bytes([self.czone_switch_bank_serial, self._display_sync_state()])
+            + u16(0x0000)
+            + bytes([0x00, 0x10])
+        )
+        self.send(PGN_65283, data, priority=7)
+        self._log(f"TX 65283 display sync: {data.hex(' ')}")
+
+    def send_config_response(self, config0: int | None = None, config1: int | None = None, config2: int | None = None):
+        config0 = self.czone_65290_config0 if config0 is None else self._normalize_byte(config0)
+        config1 = self.czone_65290_config1 if config1 is None else self._normalize_byte(config1)
+        config2 = self.czone_65290_config2 if config2 is None else self._normalize_byte(config2)
+        data = u16(CZONE_MESSAGE) + bytes([config0, config1, config2]) + u16(0x0000) + bytes([self.czone_switch_bank_serial])
+        self.send(PGN_65290, data, priority=7)
+        self._log(f"TX 65290 config response: {data.hex(' ')}")
+
+    def address_claim(self):
+        self.send(PGN_60928, encode_iso_name(), priority=6)
         self._log("TX 60928 ISO address claim")
 
     def product_information(self):
         payload = (
-            u16(self.n2k_db_version)
-            + u16(self.n2k_manufacturer_product_code)
-            + n2k_string_field(self.n2k_model_id)
-            + n2k_string_field(self.n2k_software_id)
-            + n2k_string_field(self.n2k_hardware_id)
-            + n2k_string_field(self.n2k_serial_id)
-            + bytes([self.n2k_certification_level & 0xFF, self.n2k_load_equivalency & 0xFF])
+            u16(N2K_DB_VERSION)
+            + u16(N2K_MANUFACTURER_PRODUCT_CODE)
+            + n2k_string_field(N2K_MODEL_ID)
+            + n2k_string_field(N2K_SOFTWARE_ID)
+            + n2k_string_field(N2K_HARDWARE_ID)
+            + n2k_string_field(N2K_SERIAL_ID)
+            + bytes([N2K_CERTIFICATION_LEVEL & 0xFF, N2K_LOAD_EQUIVALENCY & 0xFF])
         )
         self.send_fast_packet(PGN_126996, payload, priority=6)
         self._log("TX 126996 product information")
@@ -691,6 +685,7 @@ class CZone:
                 self.on_switch_event(0x04 + output_index, is_on)
             self.heartbeat()
             self.detailed_status()
+            self.display_sync_status()
         else:
             self._log(f"RX 65280 ignored: unsupported command 0x{cmd:02X}")
 
@@ -707,6 +702,10 @@ class CZone:
             return
         self._log("CZone authenticated")
         self.authenticated = True
+        self.send_config_response(data[2], data[3], data[4])
+        self.heartbeat()
+        self.detailed_status()
+        self.display_sync_status()
 
     def handle_request(self, src: int, data: bytes):
         if len(data) < 3:
@@ -739,6 +738,7 @@ class CZone:
         self.product_information()
         self.heartbeat()
         self.detailed_status()
+        self.display_sync_status()
 
 
 
@@ -859,33 +859,23 @@ class CZoneWebServer:
         def index():
             return """<!doctype html>
 <html><head><meta charset='utf-8'><title>CZone Emulator</title>
-<style>body{font-family:Arial,sans-serif;margin:16px}button{padding:8px;margin:4px}.on{background:#2e7d32;color:#fff}.off{background:#c62828;color:#fff}.card{border:1px solid #ccc;border-radius:8px;padding:10px;margin-bottom:10px}label{display:inline-block;min-width:190px}input[type=number]{width:90px}input[type=text]{width:190px}.grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(330px,1fr));gap:6px 16px}.field-row{margin:4px 0}.status{margin-top:6px;font-weight:bold}pre{background:#111;color:#d7ffd7;padding:8px;white-space:pre-wrap;line-height:1.25em}</style></head>
+<style>body{font-family:Arial,sans-serif;margin:16px}button{padding:8px;margin:4px}.on{background:#2e7d32;color:#fff}.off{background:#c62828;color:#fff}.card{border:1px solid #ccc;border-radius:8px;padding:10px;margin-bottom:10px}label{display:inline-block;min-width:190px}input[type=number]{width:90px}.grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(330px,1fr));gap:6px 16px}.field-row{margin:4px 0}.status{margin-top:6px;font-weight:bold}pre{background:#111;color:#d7ffd7;padding:8px;white-space:pre-wrap;line-height:1.25em}</style></head>
 <body><h2>CZone OI Emulator (Headless Web)</h2>
 <div class='card'><div id='states'></div><div id='mapping'></div></div>
 <div class='card'><h3>Switches</h3><div id='buttons'></div></div>
 <div class='card'><h3>Output currents (A)</h3><div id='currents'></div></div>
-<div class='card'><h3>NMEA 2000 Address Claim / Product Information</h3><p>Edit these fields to test whether the OEM software uses ISO Address Claim or Product Information for identification. Applying sends PGN 60928 and PGN 126996 immediately.</p><div class='grid' id='identity_fields'></div><button id='apply_identity'>Apply NMEA identity</button><div class='status' id='identity_status'></div></div>
+<div class='card'><h3>CZone proprietary identity/config</h3><p>Edit the CZone-specific bytes that are more likely to affect OEM device-type detection. Applying sends PGN 65284, 65290, 130817, and optionally 65283 immediately.</p><div class='grid' id='czone_fields'></div><button id='apply_czone_config'>Apply CZone config</button><div class='status' id='czone_config_status'></div></div>
 <div class='card'><h3>Logs</h3><pre id='logs'></pre></div>
 <script>
 let uiInit=false;
-const identityFields=[
-['src','CAN source address',0,255,'number'],
-['unique_number','Unique number',0,2097151,'number'],
-['manufacturer_code','Manufacturer code',0,2047,'number'],
-['device_instance_lower','Device instance lower',0,7,'number'],
-['device_instance_upper','Device instance upper',0,31,'number'],
-['device_function','Device function',0,255,'number'],
-['device_class','Device class',0,127,'number'],
-['system_instance','System instance',0,15,'number'],
-['industry_group','Industry group',0,7,'number'],
-['db_version','N2K DB version',0,65535,'number'],
-['manufacturer_product_code','Manufacturer product code',0,65535,'number'],
-['model_id','Model ID',null,null,'text'],
-['software_id','Software ID',null,null,'text'],
-['hardware_id','Hardware ID',null,null,'text'],
-['serial_id','Serial ID',null,null,'text'],
-['certification_level','Certification level',0,255,'number'],
-['load_equivalency','Load equivalency',0,255,'number']
+const czoneFields=[
+['dip_switch','CZone DIP/address',0,255],
+['switch_bank_serial','Switch-bank serial',0,255],
+['instance_130817','PGN 130817 instance byte',0,255],
+['config0_65290','PGN 65290 config byte 0',0,255],
+['config1_65290','PGN 65290 config byte 1',0,255],
+['config2_65290','PGN 65290 config byte 2',0,255],
+['display_sync_enabled','Send PGN 65283 display sync',0,1]
 ];
 function ensureUi(s){
 if(uiInit) return;
@@ -893,17 +883,17 @@ const b=document.getElementById('buttons');
 s.switch_states.forEach((_,i)=>{const id=i+1;const btn=document.createElement('button');btn.id=`sw_${id}`;btn.onclick=()=>fetch('/api/toggle',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({switch_id:id})}).then(refresh);b.appendChild(btn);});
 const c=document.getElementById('currents');
 Object.entries(s.output_currents).forEach(([k,val])=>{const row=document.createElement('div');row.style.margin='5px 0';row.innerHTML=`<label>Output ${k}</label><input step='0.1' min='0' max='25.5' type='number' id='out_${k}' value='${Number(val).toFixed(1)}'><button id='apply_${k}'>Apply</button>`;row.querySelector('button').onclick=()=>{const amps=parseFloat(document.getElementById(`out_${k}`).value||'0');fetch('/api/output_current',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({output_index:Number(k),amps:amps})}).then(refresh)};c.appendChild(row);});
-const identity=document.getElementById('identity_fields');
-identityFields.forEach(([key,label,min,max,type])=>{const row=document.createElement('div');row.className='field-row';const attrs=type==='number'?`type='number' min='${min}' max='${max}' step='1'`:`type='text' maxlength='31'`;row.innerHTML=`<label for='id_${key}'>${label}</label><input ${attrs} id='id_${key}'>`;identity.appendChild(row);});
-document.getElementById('apply_identity').onclick=async()=>{const body={};identityFields.forEach(([key,,,,type])=>{const value=document.getElementById(`id_${key}`).value;body[key]=type==='number'?Number(value):value;});const r=await fetch('/api/n2k_identity',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(body)});const response=await r.json();const status=document.getElementById('identity_status');if(r.ok){status.textContent='Applied NMEA identity and transmitted address/product information';}else{status.textContent=response.error||'Failed to apply NMEA identity';}refresh();};
+const cfg=document.getElementById('czone_fields');
+czoneFields.forEach(([key,label,min,max])=>{const row=document.createElement('div');row.className='field-row';row.innerHTML=`<label for='cz_${key}'>${label}</label><input type='number' min='${min}' max='${max}' step='1' id='cz_${key}'>`;cfg.appendChild(row);});
+document.getElementById('apply_czone_config').onclick=async()=>{const body={};czoneFields.forEach(([key])=>{body[key]=Number(document.getElementById(`cz_${key}`).value);});const r=await fetch('/api/czone_config',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(body)});const response=await r.json();const status=document.getElementById('czone_config_status');if(r.ok){status.textContent='Applied CZone config and transmitted proprietary frames';}else{status.textContent=response.error||'Failed to apply CZone config';}refresh();};
 uiInit=true;
 }
 async function refresh(){const s=await (await fetch('/api/state')).json();const l=await (await fetch('/api/logs')).json();ensureUi(s);
-const st=s.switch_states.map((v,i)=>`S${i+1}: ${v?'ON':'OFF'}`).join(' | ');document.getElementById('states').innerText=`DIP: ${s.czone_dip_switch}   SRC: ${s.n2k_identity.src}   Product: ${s.n2k_identity.model_id}   ${st}`;
+const st=s.switch_states.map((v,i)=>`S${i+1}: ${v?'ON':'OFF'}`).join(' | ');document.getElementById('states').innerText=`DIP: ${s.czone_config.dip_switch}   Bank serial: 0x${Number(s.czone_config.switch_bank_serial).toString(16).toUpperCase().padStart(2,'0')}   ${st}`;
 const mapLines=Object.entries(s.mappings).map(([kbd,m])=>`KBD ${kbd}: `+Object.entries(m).map(([k,v])=>`${k}->${v}`).join(', '));document.getElementById('mapping').innerText='Mappings:\\n'+mapLines.join('\\n');
 s.switch_states.forEach((v,i)=>{const id=i+1;const btn=document.getElementById(`sw_${id}`);btn.className=v?'on':'off';btn.textContent=`Toggle S${id} (${v?'ON':'OFF'})`;});
 Object.entries(s.output_currents).forEach(([k,val])=>{const input=document.getElementById(`out_${k}`);if(document.activeElement!==input){input.value=Number(val).toFixed(1);}});
-identityFields.forEach(([key,,,,type])=>{const input=document.getElementById(`id_${key}`);if(document.activeElement!==input){input.value=type==='number'?Number(s.n2k_identity[key]):s.n2k_identity[key];}});
+czoneFields.forEach(([key])=>{const input=document.getElementById(`cz_${key}`);if(document.activeElement!==input){input.value=Number(s.czone_config[key]);}});
 document.getElementById('logs').textContent=(l.logs||[]).slice(-50).join('\\n');}
 setInterval(refresh,1000);refresh();
 </script></body></html>
@@ -914,7 +904,7 @@ setInterval(refresh,1000);refresh();
             return jsonify({
                 'switch_states': self.czone.get_switch_states(),
                 'czone_dip_switch': self.czone.czone_dip_switch,
-                'n2k_identity': self.czone.get_n2k_identity(),
+                'czone_config': self.czone.get_czone_config(),
                 'output_currents': {
                     str(output_index): self.czone.get_output_current(output_index)
                     for output_index in range(1, ADJUSTABLE_OUTPUT_COUNT + 1)
@@ -938,6 +928,7 @@ setInterval(refresh,1000);refresh();
                 self.czone.on_switch_event(0x04 + switch_id, updated)
             self.czone.heartbeat()
             self.czone.detailed_status()
+            self.czone.display_sync_status()
             return jsonify({'switch_id': switch_id, 'is_on': updated})
 
         @self.app.post('/api/output_current')
@@ -954,25 +945,26 @@ setInterval(refresh,1000);refresh();
             return jsonify({'output_index': output_index, 'amps': normalized})
 
 
-        @self.app.post('/api/n2k_identity')
-        def set_n2k_identity():
+        @self.app.post('/api/czone_config')
+        def set_czone_config():
             payload = request.get_json(silent=True) or {}
             if not isinstance(payload, dict):
                 return jsonify({'error': 'JSON object is required'}), 400
-            integer_fields = set(self.czone.get_n2k_identity()) - {"model_id", "software_id", "hardware_id", "serial_id"}
             values = {}
             try:
                 for field, value in payload.items():
-                    if field in integer_fields:
-                        values[field] = int(str(value).strip(), 0)
+                    if field == 'display_sync_enabled':
+                        values[field] = value if isinstance(value, bool) else bool(int(str(value).strip(), 0))
                     else:
-                        values[field] = value
-                identity = self.czone.update_n2k_identity(values)
+                        values[field] = int(str(value).strip(), 0)
+                config = self.czone.update_czone_config(values)
             except ValueError as exc:
                 return jsonify({'error': str(exc)}), 400
-            self.czone.address_claim()
-            self.czone.product_information()
-            return jsonify({'n2k_identity': identity})
+            self.czone.heartbeat()
+            self.czone.send_config_response()
+            self.czone.detailed_status()
+            self.czone.display_sync_status()
+            return jsonify({'czone_config': config})
 
         @self.app.get('/api/logs')
         def logs():
@@ -1146,6 +1138,7 @@ class CZoneGui:
                 self.append_log(f"Modbus breaker {switch_id} status -> {source_state}")
                 self.czone.heartbeat()
                 self.czone.detailed_status()
+                self.czone.display_sync_status()
 
     def _check_modbus_timeouts(self):
         now = time.time()
@@ -1312,6 +1305,7 @@ class CZoneHeadless:
                 self.logger.log(f"Modbus breaker {switch_id} status -> {source_state}")
                 self.czone.heartbeat()
                 self.czone.detailed_status()
+                self.czone.display_sync_status()
 
     def _check_modbus_timeouts(self):
         now = time.time()
@@ -1364,6 +1358,7 @@ class CZoneHeadless:
             if now - self.last_status > 2:
                 self.last_status = now
                 self.czone.detailed_status()
+                self.czone.display_sync_status()
             time.sleep(0.05)
 
     def close(self):
@@ -1420,6 +1415,7 @@ def main():
             czone.product_information()
             czone.heartbeat()
             czone.detailed_status()
+            czone.display_sync_status()
             time.sleep(0.1)
 
         if headless:

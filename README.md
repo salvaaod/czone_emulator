@@ -137,16 +137,16 @@ Then open: `http://<host>:8080/`
 When in headless mode:
 
 - `GET /api/state`
-  - Returns switch states, DIP switch value, NMEA 2000 identity/product fields, adjustable output currents, and keyboard mappings.
+  - Returns switch states, DIP switch value, CZone proprietary config fields, adjustable output currents, and keyboard mappings.
 - `POST /api/toggle`
   - JSON: `{ "switch_id": 1..4 }`
   - Toggles a switch and returns updated state.
 - `POST /api/output_current`
   - JSON: `{ "output_index": 1..4, "amps": <float> }`
   - Sets output current (quantized to 0.1 A, clamped to supported range).
-- `POST /api/n2k_identity`
-  - JSON object with any NMEA identity/product fields to change, for example `{ "src": 20, "manufacturer_code": 295, "device_function": 140, "device_class": 30, "model_id": "Azimut AC Controller" }`.
-  - Changes the active ISO Address Claim/Product Information values, then immediately transmits PGN `60928` and PGN `126996`.
+- `POST /api/czone_config`
+  - JSON object with any CZone proprietary fields to change, for example `{ "dip_switch": 2, "switch_bank_serial": 29, "instance_130817": 1, "config0_65290": 253, "config1_65290": 15, "config2_65290": 0 }`.
+  - Changes the active CZone proprietary bytes, then immediately transmits PGN `65284`, PGN `65290`, PGN `130817`, and optionally PGN `65283`.
 - `GET /api/logs`
   - Returns recent log entries.
 
