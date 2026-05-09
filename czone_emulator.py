@@ -360,17 +360,26 @@ def n2k_string_field(text: str, field_len: int = 32) -> bytes:
     return raw + b"\x00" + (b"\xFF" * (field_len - len(raw) - 1))
 
 
-def encode_iso_name() -> bytes:
+def encode_iso_name(
+    unique_number: int,
+    manufacturer_code: int,
+    device_instance_lower: int,
+    device_instance_upper: int,
+    device_function: int,
+    device_class: int,
+    system_instance: int,
+    industry_group: int,
+) -> bytes:
     value = 0
-    value |= N2K_UNIQUE_NUMBER & 0x1FFFFF
-    value |= (N2K_MANUFACTURER_CODE & 0x7FF) << 21
-    value |= (N2K_DEVICE_INSTANCE_LOWER & 0x07) << 32
-    value |= (N2K_DEVICE_INSTANCE_UPPER & 0x1F) << 35
-    value |= (N2K_DEVICE_FUNCTION & 0xFF) << 40
+    value |= unique_number & 0x1FFFFF
+    value |= (manufacturer_code & 0x7FF) << 21
+    value |= (device_instance_lower & 0x07) << 32
+    value |= (device_instance_upper & 0x1F) << 35
+    value |= (device_function & 0xFF) << 40
     value |= 0 << 48  # Reserved
-    value |= (N2K_DEVICE_CLASS & 0x7F) << 49
-    value |= (N2K_SYSTEM_INSTANCE & 0x0F) << 56
-    value |= (N2K_INDUSTRY_GROUP & 0x07) << 60
+    value |= (device_class & 0x7F) << 49
+    value |= (system_instance & 0x0F) << 56
+    value |= (industry_group & 0x07) << 60
     value |= 1 << 63  # Reserved bit
     return value.to_bytes(8, "little")
 
@@ -386,17 +395,34 @@ class CZone:
     on_switch_event: Optional[Callable[[int, bool], None]] = None
     logger: Optional["AppLogger"] = None
     czone_dip_switch: int = CZONE_DIP_SWITCH_DEFAULT
-    czone_message: int = CZONE_MESSAGE
+    src: int = SRC
+    n2k_unique_number: int = N2K_UNIQUE_NUMBER
+    n2k_manufacturer_code: int = N2K_MANUFACTURER_CODE
+    n2k_device_instance_lower: int = N2K_DEVICE_INSTANCE_LOWER
+    n2k_device_instance_upper: int = N2K_DEVICE_INSTANCE_UPPER
+    n2k_device_function: int = N2K_DEVICE_FUNCTION
+    n2k_device_class: int = N2K_DEVICE_CLASS
+    n2k_system_instance: int = N2K_SYSTEM_INSTANCE
+    n2k_industry_group: int = N2K_INDUSTRY_GROUP
+    n2k_db_version: int = N2K_DB_VERSION
+    n2k_certification_level: int = N2K_CERTIFICATION_LEVEL
+    n2k_load_equivalency: int = N2K_LOAD_EQUIVALENCY
+    n2k_manufacturer_product_code: int = N2K_MANUFACTURER_PRODUCT_CODE
+    n2k_model_id: str = N2K_MODEL_ID
+    n2k_software_id: str = N2K_SOFTWARE_ID
+    n2k_hardware_id: str = N2K_HARDWARE_ID
+    n2k_serial_id: str = N2K_SERIAL_ID
     pending_commands: dict[int, int] | None = None
     keyboard_switch_maps: dict[int, dict[int, int]] | None = None
 
     def __post_init__(self):
         self.czone_dip_switch = self._normalize_byte(self.czone_dip_switch)
-        self.czone_message = self._normalize_u16(self.czone_message)
+        self._normalize_n2k_identity()
         self._log("CZone startup: pre-authenticated for immediate display sync")
         self._log(
-            f"Identity: NMEA2000 SRC={SRC}, CZone DIP Switch={self.czone_dip_switch}, "
-            f"CZone Message=0x{self.czone_message:04X}"
+            f"Identity: NMEA2000 SRC={self.src}, CZone DIP Switch={self.czone_dip_switch}, "
+            f"manufacturer={self.n2k_manufacturer_code}, function={self.n2k_device_function}, "
+            f"class={self.n2k_device_class}, product={self.n2k_manufacturer_product_code}"
         )
         if self.pending_commands is None:
             self.pending_commands = {}
@@ -418,10 +444,67 @@ class CZone:
     def _normalize_u16(value: int) -> int:
         return max(0, min(0xFFFF, int(value)))
 
-    def set_czone_message(self, value: int) -> int:
-        self.czone_message = self._normalize_u16(value)
-        self._log(f"CZone message identifier set to 0x{self.czone_message:04X}")
-        return self.czone_message
+    @staticmethod
+    def _normalize_range(value: int, minimum: int, maximum: int) -> int:
+        return max(minimum, min(maximum, int(value)))
+
+    def _normalize_n2k_identity(self):
+        self.src = self._normalize_byte(self.src)
+        self.n2k_unique_number = self._normalize_range(self.n2k_unique_number, 0, 0x1FFFFF)
+        self.n2k_manufacturer_code = self._normalize_range(self.n2k_manufacturer_code, 0, 0x7FF)
+        self.n2k_device_instance_lower = self._normalize_range(self.n2k_device_instance_lower, 0, 0x07)
+        self.n2k_device_instance_upper = self._normalize_range(self.n2k_device_instance_upper, 0, 0x1F)
+        self.n2k_device_function = self._normalize_byte(self.n2k_device_function)
+        self.n2k_device_class = self._normalize_range(self.n2k_device_class, 0, 0x7F)
+        self.n2k_system_instance = self._normalize_range(self.n2k_system_instance, 0, 0x0F)
+        self.n2k_industry_group = self._normalize_range(self.n2k_industry_group, 0, 0x07)
+        self.n2k_db_version = self._normalize_u16(self.n2k_db_version)
+        self.n2k_certification_level = self._normalize_byte(self.n2k_certification_level)
+        self.n2k_load_equivalency = self._normalize_byte(self.n2k_load_equivalency)
+        self.n2k_manufacturer_product_code = self._normalize_u16(self.n2k_manufacturer_product_code)
+        self.n2k_model_id = str(self.n2k_model_id)
+        self.n2k_software_id = str(self.n2k_software_id)
+        self.n2k_hardware_id = str(self.n2k_hardware_id)
+        self.n2k_serial_id = str(self.n2k_serial_id)
+
+    def get_n2k_identity(self) -> dict[str, int | str]:
+        return {
+            "src": self.src,
+            "unique_number": self.n2k_unique_number,
+            "manufacturer_code": self.n2k_manufacturer_code,
+            "device_instance_lower": self.n2k_device_instance_lower,
+            "device_instance_upper": self.n2k_device_instance_upper,
+            "device_function": self.n2k_device_function,
+            "device_class": self.n2k_device_class,
+            "system_instance": self.n2k_system_instance,
+            "industry_group": self.n2k_industry_group,
+            "db_version": self.n2k_db_version,
+            "manufacturer_product_code": self.n2k_manufacturer_product_code,
+            "model_id": self.n2k_model_id,
+            "software_id": self.n2k_software_id,
+            "hardware_id": self.n2k_hardware_id,
+            "serial_id": self.n2k_serial_id,
+            "certification_level": self.n2k_certification_level,
+            "load_equivalency": self.n2k_load_equivalency,
+        }
+
+    def update_n2k_identity(self, values: dict[str, int | str]) -> dict[str, int | str]:
+        integer_fields = set(self.get_n2k_identity()) - {"model_id", "software_id", "hardware_id", "serial_id"}
+        string_fields = {"model_id", "software_id", "hardware_id", "serial_id"}
+        for field, value in values.items():
+            if field in integer_fields:
+                setattr(self, f"n2k_{field}" if field != "src" else "src", int(value))
+            elif field in string_fields:
+                setattr(self, f"n2k_{field}", str(value))
+            else:
+                raise ValueError(f"Unsupported NMEA 2000 identity field: {field}")
+        self._normalize_n2k_identity()
+        identity = self.get_n2k_identity()
+        self._log(
+            "NMEA 2000 identity updated: "
+            + ", ".join(f"{key}={value}" for key, value in identity.items())
+        )
+        return identity
 
     def set_output_current_tenths(self, output_index: int, value: int):
         if not (1 <= output_index <= OUTPUT_COUNT):
@@ -456,7 +539,7 @@ class CZone:
 
     def send(self, pgn, data, priority=7):
         try:
-            self.dev.send(n2k_id(priority, pgn, SRC), data)
+            self.dev.send(n2k_id(priority, pgn, self.src), data)
         except Exception as exc:
             self._log(f"CAN TX failed for PGN {pgn}: {exc}")
 
@@ -491,9 +574,9 @@ class CZone:
 
     def heartbeat(self):
         if self.authenticated:
-            data = u16(self.czone_message) + bytes([self.czone_dip_switch, 0x0F, self.state, 0x00, 0x00, 0x00])
+            data = u16(CZONE_MESSAGE) + bytes([self.czone_dip_switch, 0x0F, self.state, 0x00, 0x00, 0x00])
         else:
-            data = u16(self.czone_message) + bytes([0xFF]) + u16(0x0F0F) + u16(0) + bytes([0])
+            data = u16(CZONE_MESSAGE) + bytes([0xFF]) + u16(0x0F0F) + u16(0) + bytes([0])
 
         self.send(PGN_65284, data)
 
@@ -502,7 +585,7 @@ class CZone:
         # Current mapping discovered from bench testing:
         # O1 -> block1 b0, O2 -> block1 b3, O3 -> block2 b2, O4 -> block3 b1,
         # then +3 byte stride for outputs 5 and 6.
-        payload = bytearray(u16(self.czone_message) + bytes([0x00, self.czone_dip_switch]))
+        payload = bytearray(u16(CZONE_MESSAGE) + bytes([0x00, self.czone_dip_switch]))
         output_bytes = bytearray([0x00, 0x00, 0x04, 0x00] * OUTPUT_COUNT)
 
         current_byte_positions = {1: 0, 2: 3, 3: 6, 4: 9, 5: 12, 6: 15}
@@ -521,18 +604,31 @@ class CZone:
             )
 
     def address_claim(self):
-        self.send(PGN_60928, encode_iso_name(), priority=6)
+        self.send(
+            PGN_60928,
+            encode_iso_name(
+                self.n2k_unique_number,
+                self.n2k_manufacturer_code,
+                self.n2k_device_instance_lower,
+                self.n2k_device_instance_upper,
+                self.n2k_device_function,
+                self.n2k_device_class,
+                self.n2k_system_instance,
+                self.n2k_industry_group,
+            ),
+            priority=6,
+        )
         self._log("TX 60928 ISO address claim")
 
     def product_information(self):
         payload = (
-            u16(N2K_DB_VERSION)
-            + u16(N2K_MANUFACTURER_PRODUCT_CODE)
-            + n2k_string_field(N2K_MODEL_ID)
-            + n2k_string_field(N2K_SOFTWARE_ID)
-            + n2k_string_field(N2K_HARDWARE_ID)
-            + n2k_string_field(N2K_SERIAL_ID)
-            + bytes([N2K_CERTIFICATION_LEVEL & 0xFF, N2K_LOAD_EQUIVALENCY & 0xFF])
+            u16(self.n2k_db_version)
+            + u16(self.n2k_manufacturer_product_code)
+            + n2k_string_field(self.n2k_model_id)
+            + n2k_string_field(self.n2k_software_id)
+            + n2k_string_field(self.n2k_hardware_id)
+            + n2k_string_field(self.n2k_serial_id)
+            + bytes([self.n2k_certification_level & 0xFF, self.n2k_load_equivalency & 0xFF])
         )
         self.send_fast_packet(PGN_126996, payload, priority=6)
         self._log("TX 126996 product information")
@@ -557,7 +653,7 @@ class CZone:
             self._log("RX 65280 ignored: frame shorter than 7 bytes")
             return
 
-        if int.from_bytes(data[:2], "little") != self.czone_message:
+        if int.from_bytes(data[:2], "little") != CZONE_MESSAGE:
             self._log("RX 65280 ignored: signature is not CZone message")
             return
 
@@ -606,7 +702,7 @@ class CZone:
         if len(data) < 8:
             self._log("RX 65290 ignored: frame shorter than 8 bytes")
             return
-        if int.from_bytes(data[:2], "little") != self.czone_message:
+        if int.from_bytes(data[:2], "little") != CZONE_MESSAGE:
             self._log("RX 65290 ignored: signature is not CZone message")
             return
         self._log("CZone authenticated")
@@ -763,30 +859,51 @@ class CZoneWebServer:
         def index():
             return """<!doctype html>
 <html><head><meta charset='utf-8'><title>CZone Emulator</title>
-<style>body{font-family:Arial,sans-serif;margin:16px}button{padding:8px;margin:4px}.on{background:#2e7d32;color:#fff}.off{background:#c62828;color:#fff}.card{border:1px solid #ccc;border-radius:8px;padding:10px;margin-bottom:10px}label{display:inline-block;min-width:110px}input[type=number]{width:90px}input[type=text]{width:100px}pre{background:#111;color:#d7ffd7;padding:8px;white-space:pre-wrap;line-height:1.25em}</style></head>
+<style>body{font-family:Arial,sans-serif;margin:16px}button{padding:8px;margin:4px}.on{background:#2e7d32;color:#fff}.off{background:#c62828;color:#fff}.card{border:1px solid #ccc;border-radius:8px;padding:10px;margin-bottom:10px}label{display:inline-block;min-width:190px}input[type=number]{width:90px}input[type=text]{width:190px}.grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(330px,1fr));gap:6px 16px}.field-row{margin:4px 0}.status{margin-top:6px;font-weight:bold}pre{background:#111;color:#d7ffd7;padding:8px;white-space:pre-wrap;line-height:1.25em}</style></head>
 <body><h2>CZone OI Emulator (Headless Web)</h2>
 <div class='card'><div id='states'></div><div id='mapping'></div></div>
 <div class='card'><h3>Switches</h3><div id='buttons'></div></div>
 <div class='card'><h3>Output currents (A)</h3><div id='currents'></div></div>
-<div class='card'><h3>CZone message identifier</h3><p>Enter a 16-bit value such as <code>0xFD0F</code> or <code>0xFE0A</code>. After applying, CZone TX/RX messages use the new identifier.</p><label>Identifier</label><input type='text' id='czone_message'><button id='apply_czone_message'>Apply</button><div id='czone_message_status'></div></div>
+<div class='card'><h3>NMEA 2000 Address Claim / Product Information</h3><p>Edit these fields to test whether the OEM software uses ISO Address Claim or Product Information for identification. Applying sends PGN 60928 and PGN 126996 immediately.</p><div class='grid' id='identity_fields'></div><button id='apply_identity'>Apply NMEA identity</button><div class='status' id='identity_status'></div></div>
 <div class='card'><h3>Logs</h3><pre id='logs'></pre></div>
 <script>
 let uiInit=false;
+const identityFields=[
+['src','CAN source address',0,255,'number'],
+['unique_number','Unique number',0,2097151,'number'],
+['manufacturer_code','Manufacturer code',0,2047,'number'],
+['device_instance_lower','Device instance lower',0,7,'number'],
+['device_instance_upper','Device instance upper',0,31,'number'],
+['device_function','Device function',0,255,'number'],
+['device_class','Device class',0,127,'number'],
+['system_instance','System instance',0,15,'number'],
+['industry_group','Industry group',0,7,'number'],
+['db_version','N2K DB version',0,65535,'number'],
+['manufacturer_product_code','Manufacturer product code',0,65535,'number'],
+['model_id','Model ID',null,null,'text'],
+['software_id','Software ID',null,null,'text'],
+['hardware_id','Hardware ID',null,null,'text'],
+['serial_id','Serial ID',null,null,'text'],
+['certification_level','Certification level',0,255,'number'],
+['load_equivalency','Load equivalency',0,255,'number']
+];
 function ensureUi(s){
 if(uiInit) return;
 const b=document.getElementById('buttons');
 s.switch_states.forEach((_,i)=>{const id=i+1;const btn=document.createElement('button');btn.id=`sw_${id}`;btn.onclick=()=>fetch('/api/toggle',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({switch_id:id})}).then(refresh);b.appendChild(btn);});
 const c=document.getElementById('currents');
 Object.entries(s.output_currents).forEach(([k,val])=>{const row=document.createElement('div');row.style.margin='5px 0';row.innerHTML=`<label>Output ${k}</label><input step='0.1' min='0' max='25.5' type='number' id='out_${k}' value='${Number(val).toFixed(1)}'><button id='apply_${k}'>Apply</button>`;row.querySelector('button').onclick=()=>{const amps=parseFloat(document.getElementById(`out_${k}`).value||'0');fetch('/api/output_current',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({output_index:Number(k),amps:amps})}).then(refresh)};c.appendChild(row);});
-document.getElementById('apply_czone_message').onclick=async()=>{const value=document.getElementById('czone_message').value;const r=await fetch('/api/czone_message',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({czone_message:value})});const body=await r.json();const status=document.getElementById('czone_message_status');if(r.ok){status.textContent=`Applied ${body.czone_message_hex}`;}else{status.textContent=body.error||'Failed to apply identifier';}refresh();};
+const identity=document.getElementById('identity_fields');
+identityFields.forEach(([key,label,min,max,type])=>{const row=document.createElement('div');row.className='field-row';const attrs=type==='number'?`type='number' min='${min}' max='${max}' step='1'`:`type='text' maxlength='31'`;row.innerHTML=`<label for='id_${key}'>${label}</label><input ${attrs} id='id_${key}'>`;identity.appendChild(row);});
+document.getElementById('apply_identity').onclick=async()=>{const body={};identityFields.forEach(([key,,,,type])=>{const value=document.getElementById(`id_${key}`).value;body[key]=type==='number'?Number(value):value;});const r=await fetch('/api/n2k_identity',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(body)});const response=await r.json();const status=document.getElementById('identity_status');if(r.ok){status.textContent='Applied NMEA identity and transmitted address/product information';}else{status.textContent=response.error||'Failed to apply NMEA identity';}refresh();};
 uiInit=true;
 }
 async function refresh(){const s=await (await fetch('/api/state')).json();const l=await (await fetch('/api/logs')).json();ensureUi(s);
-const st=s.switch_states.map((v,i)=>`S${i+1}: ${v?'ON':'OFF'}`).join(' | ');document.getElementById('states').innerText=`DIP: ${s.czone_dip_switch}   CZone Message: ${s.czone_message_hex}   ${st}`;
-const mapLines=Object.entries(s.mappings).map(([kbd,m])=>`KBD ${kbd}: `+Object.entries(m).map(([k,v])=>`${k}->${v}`).join(', '));document.getElementById('mapping').innerText='Mappings:\\n'+mapLines.join('\\n');
+const st=s.switch_states.map((v,i)=>`S${i+1}: ${v?'ON':'OFF'}`).join(' | ');document.getElementById('states').innerText=`DIP: ${s.czone_dip_switch}   SRC: ${s.n2k_identity.src}   Product: ${s.n2k_identity.model_id}   ${st}`;
+const mapLines=Object.entries(s.mappings).map(([kbd,m])=>`KBD ${kbd}: `+Object.entries(m).map(([k,v])=>`${k}->${v}`).join(', '));document.getElementById('mapping').innerText='Mappings:\n'+mapLines.join('\n');
 s.switch_states.forEach((v,i)=>{const id=i+1;const btn=document.getElementById(`sw_${id}`);btn.className=v?'on':'off';btn.textContent=`Toggle S${id} (${v?'ON':'OFF'})`;});
 Object.entries(s.output_currents).forEach(([k,val])=>{const input=document.getElementById(`out_${k}`);if(document.activeElement!==input){input.value=Number(val).toFixed(1);}});
-const msgInput=document.getElementById('czone_message');if(document.activeElement!==msgInput){msgInput.value=s.czone_message_hex;}
+identityFields.forEach(([key,,,,type])=>{const input=document.getElementById(`id_${key}`);if(document.activeElement!==input){input.value=type==='number'?Number(s.n2k_identity[key]):s.n2k_identity[key];}});
 document.getElementById('logs').textContent=(l.logs||[]).slice(-50).join('\\n');}
 setInterval(refresh,1000);refresh();
 </script></body></html>
@@ -797,8 +914,7 @@ setInterval(refresh,1000);refresh();
             return jsonify({
                 'switch_states': self.czone.get_switch_states(),
                 'czone_dip_switch': self.czone.czone_dip_switch,
-                'czone_message': self.czone.czone_message,
-                'czone_message_hex': f'0x{self.czone.czone_message:04X}',
+                'n2k_identity': self.czone.get_n2k_identity(),
                 'output_currents': {
                     str(output_index): self.czone.get_output_current(output_index)
                     for output_index in range(1, ADJUSTABLE_OUTPUT_COUNT + 1)
@@ -838,26 +954,25 @@ setInterval(refresh,1000);refresh();
             return jsonify({'output_index': output_index, 'amps': normalized})
 
 
-        @self.app.post('/api/czone_message')
-        def set_czone_message():
+        @self.app.post('/api/n2k_identity')
+        def set_n2k_identity():
             payload = request.get_json(silent=True) or {}
-            raw_value = payload.get('czone_message')
-            if raw_value is None:
-                return jsonify({'error': 'czone_message is required'}), 400
-            raw_text = str(raw_value).strip()
+            if not isinstance(payload, dict):
+                return jsonify({'error': 'JSON object is required'}), 400
+            integer_fields = set(self.czone.get_n2k_identity()) - {"model_id", "software_id", "hardware_id", "serial_id"}
+            values = {}
             try:
-                value = int(raw_text, 0)
-            except ValueError:
-                try:
-                    value = int(raw_text, 16)
-                except ValueError:
-                    return jsonify({'error': 'czone_message must be an integer, for example 0xFD0F or FD0F'}), 400
-            if not (0 <= value <= 0xFFFF):
-                return jsonify({'error': 'czone_message must be between 0x0000 and 0xFFFF'}), 400
-            normalized = self.czone.set_czone_message(value)
-            self.czone.heartbeat()
-            self.czone.detailed_status()
-            return jsonify({'czone_message': normalized, 'czone_message_hex': f'0x{normalized:04X}'})
+                for field, value in payload.items():
+                    if field in integer_fields:
+                        values[field] = int(str(value).strip(), 0)
+                    else:
+                        values[field] = value
+                identity = self.czone.update_n2k_identity(values)
+            except ValueError as exc:
+                return jsonify({'error': str(exc)}), 400
+            self.czone.address_claim()
+            self.czone.product_information()
+            return jsonify({'n2k_identity': identity})
 
         @self.app.get('/api/logs')
         def logs():
