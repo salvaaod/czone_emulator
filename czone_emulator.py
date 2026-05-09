@@ -1,9 +1,11 @@
 import ctypes
 from errno import ENOBUFS
+import json
 import os
 import platform
 import struct
 import subprocess
+import sys
 import threading
 import time
 import tkinter as tk
@@ -43,6 +45,7 @@ N2K_DEVICE_INSTANCE_UPPER = 0
 N2K_DEVICE_FUNCTION = 140
 N2K_DEVICE_CLASS = 30
 N2K_SYSTEM_INSTANCE = 0
+CZONE_HEARTBEAT_TYPE = 0x0F
 N2K_INDUSTRY_GROUP = 4
 
 N2K_DB_VERSION = 2000
@@ -71,6 +74,67 @@ KEYBOARD_SWITCH_MAPS = {
     32:  {0x09: 1, 0x0A: 2, 0x0B: 3, 0x0C: 4},
 #   255: {0x09: 1, 0x0A: 2, 0x0B: 3, 0x0C: 4},
 }
+
+RUNTIME_CONFIG_FILENAME = "czone_runtime_config.json"
+RUNTIME_CONFIG_FIELDS = {
+    "n2k_device_function": {"global": "N2K_DEVICE_FUNCTION", "min": 0, "max": 255},
+    "n2k_device_class": {"global": "N2K_DEVICE_CLASS", "min": 0, "max": 127},
+    "czone_heartbeat_type": {"global": "CZONE_HEARTBEAT_TYPE", "min": 0, "max": 255},
+}
+
+
+def _runtime_config_path() -> str:
+    return os.getenv(
+        "CZONE_RUNTIME_CONFIG",
+        os.path.join(os.path.dirname(os.path.abspath(__file__)), RUNTIME_CONFIG_FILENAME),
+    )
+
+
+def _coerce_runtime_config_value(name: str, value) -> int:
+    field = RUNTIME_CONFIG_FIELDS[name]
+    if isinstance(value, str):
+        parsed = int(value.strip(), 0)
+    else:
+        parsed = int(value)
+    return max(field["min"], min(field["max"], parsed))
+
+
+def current_runtime_config() -> dict[str, int]:
+    return {name: int(globals()[field["global"]]) for name, field in RUNTIME_CONFIG_FIELDS.items()}
+
+
+def load_runtime_config():
+    path = _runtime_config_path()
+    if not os.path.exists(path):
+        return
+    with open(path, "r", encoding="utf-8") as config_file:
+        raw = json.load(config_file)
+    if not isinstance(raw, dict):
+        raise ValueError(f"Runtime config must be a JSON object: {path}")
+    for name, field in RUNTIME_CONFIG_FIELDS.items():
+        if name in raw:
+            globals()[field["global"]] = _coerce_runtime_config_value(name, raw[name])
+
+
+def save_runtime_config(values: dict[str, object]) -> dict[str, int]:
+    normalized = current_runtime_config()
+    for name in RUNTIME_CONFIG_FIELDS:
+        if name in values:
+            normalized[name] = _coerce_runtime_config_value(name, values[name])
+    path = _runtime_config_path()
+    with open(path, "w", encoding="utf-8") as config_file:
+        json.dump(normalized, config_file, indent=2, sort_keys=True)
+        config_file.write("\n")
+    return normalized
+
+
+def restart_process():
+    os.execv(sys.executable, [sys.executable] + sys.argv)
+
+
+def schedule_restart(delay_seconds: float = 0.2):
+    threading.Timer(delay_seconds, restart_process).start()
+
 
 # ---------------- CAN STRUCTS ----------------
 
@@ -477,7 +541,7 @@ class CZone:
 
     def heartbeat(self):
         if self.authenticated:
-            data = u16(CZONE_MESSAGE) + bytes([self.czone_dip_switch, 0x0F, self.state, 0x00, 0x00, 0x00])
+            data = u16(CZONE_MESSAGE) + bytes([self.czone_dip_switch, CZONE_HEARTBEAT_TYPE, self.state, 0x00, 0x00, 0x00])
         else:
             data = u16(CZONE_MESSAGE) + bytes([0xFF]) + u16(0x0F0F) + u16(0) + bytes([0])
 
@@ -754,6 +818,7 @@ class CZoneWebServer:
 <div class='card'><div id='states'></div><div id='mapping'></div></div>
 <div class='card'><h3>Switches</h3><div id='buttons'></div></div>
 <div class='card'><h3>Output currents (A)</h3><div id='currents'></div></div>
+<div class='card'><h3>Runtime identity settings</h3><p>Apply saves these values and restarts the emulator so NMEA identity and heartbeat frames use them.</p><div id='runtime_config'></div><button id='apply_runtime_config'>Apply and reload app</button></div>
 <div class='card'><h3>Logs</h3><pre id='logs'></pre></div>
 <script>
 let uiInit=false;
@@ -763,6 +828,10 @@ const b=document.getElementById('buttons');
 s.switch_states.forEach((_,i)=>{const id=i+1;const btn=document.createElement('button');btn.id=`sw_${id}`;btn.onclick=()=>fetch('/api/toggle',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({switch_id:id})}).then(refresh);b.appendChild(btn);});
 const c=document.getElementById('currents');
 Object.entries(s.output_currents).forEach(([k,val])=>{const row=document.createElement('div');row.style.margin='5px 0';row.innerHTML=`<label>Output ${k}</label><input step='0.1' min='0' max='25.5' type='number' id='out_${k}' value='${Number(val).toFixed(1)}'><button id='apply_${k}'>Apply</button>`;row.querySelector('button').onclick=()=>{const amps=parseFloat(document.getElementById(`out_${k}`).value||'0');fetch('/api/output_current',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({output_index:Number(k),amps:amps})}).then(refresh)};c.appendChild(row);});
+const cfg=document.getElementById('runtime_config');
+const fields=[['n2k_device_function','NMEA device function',0,255],['n2k_device_class','NMEA device class',0,127],['czone_heartbeat_type','CZone heartbeat type',0,255]];
+fields.forEach(([key,label,min,max])=>{const row=document.createElement('div');row.style.margin='5px 0';const val=s.runtime_config[key];row.innerHTML=`<label>${label}</label><input type='text' id='cfg_${key}' value='${val}'><span style='margin-left:6px;color:#555' id='cfg_${key}_hex'>0x${Number(val).toString(16).toUpperCase().padStart(2,'0')}</span>`;cfg.appendChild(row);});
+document.getElementById('apply_runtime_config').onclick=async()=>{const body={};fields.forEach(([key])=>{body[key]=document.getElementById(`cfg_${key}`).value;});const resp=await fetch('/api/runtime_config',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(body)});if(!resp.ok){const err=await resp.json();alert(err.error||'Runtime config update failed');return;}setTimeout(()=>location.reload(),1500);};
 uiInit=true;
 }
 async function refresh(){const s=await (await fetch('/api/state')).json();const l=await (await fetch('/api/logs')).json();ensureUi(s);
@@ -770,6 +839,7 @@ const st=s.switch_states.map((v,i)=>`S${i+1}: ${v?'ON':'OFF'}`).join(' | ');docu
 const mapLines=Object.entries(s.mappings).map(([kbd,m])=>`KBD ${kbd}: `+Object.entries(m).map(([k,v])=>`${k}->${v}`).join(', '));document.getElementById('mapping').innerText='Mappings:\\n'+mapLines.join('\\n');
 s.switch_states.forEach((v,i)=>{const id=i+1;const btn=document.getElementById(`sw_${id}`);btn.className=v?'on':'off';btn.textContent=`Toggle S${id} (${v?'ON':'OFF'})`;});
 Object.entries(s.output_currents).forEach(([k,val])=>{const input=document.getElementById(`out_${k}`);if(document.activeElement!==input){input.value=Number(val).toFixed(1);}});
+Object.entries(s.runtime_config).forEach(([k,val])=>{const input=document.getElementById(`cfg_${k}`);const hex=document.getElementById(`cfg_${k}_hex`);if(input&&document.activeElement!==input){input.value=val;}if(hex){hex.textContent=`0x${Number(input?input.value:val).toString(16).toUpperCase().padStart(2,'0')}`;}});
 document.getElementById('logs').textContent=(l.logs||[]).slice(-50).join('\\n');}
 setInterval(refresh,1000);refresh();
 </script></body></html>
@@ -788,7 +858,22 @@ setInterval(refresh,1000);refresh();
                     str(keyboard_id): {f"0x{k:02X}": v for k, v in sorted(mapping.items())}
                     for keyboard_id, mapping in sorted(self.czone.keyboard_switch_maps.items())
                 },
+                'runtime_config': current_runtime_config(),
             })
+
+        @self.app.post('/api/runtime_config')
+        def set_runtime_config():
+            payload = request.get_json(silent=True) or {}
+            try:
+                normalized = save_runtime_config(payload)
+            except (TypeError, ValueError) as exc:
+                return jsonify({'error': str(exc)}), 400
+            self.logger.log(
+                "Web runtime config updated; restarting: "
+                + ", ".join(f"{name}={value}" for name, value in normalized.items())
+            )
+            schedule_restart()
+            return jsonify({'runtime_config': normalized, 'restarting': True})
 
         @self.app.post('/api/toggle')
         def toggle():
@@ -883,6 +968,27 @@ class CZoneGui:
             spin.bind("<Return>", lambda _, idx=output_index: self.apply_output_current(idx))
             spin.bind("<FocusOut>", lambda _, idx=output_index: self.apply_output_current(idx))
             self.current_vars[output_index] = var
+
+        config_frame = tk.LabelFrame(self.root, text="Runtime identity settings")
+        config_frame.pack(pady=(0, 12), padx=8, fill="x")
+        self.runtime_config_vars = {}
+        config_rows = (
+            ("n2k_device_function", "NMEA device function"),
+            ("n2k_device_class", "NMEA device class"),
+            ("czone_heartbeat_type", "CZone heartbeat type"),
+        )
+        config = current_runtime_config()
+        for key, label in config_rows:
+            row = tk.Frame(config_frame)
+            row.pack(fill="x", padx=6, pady=2)
+            tk.Label(row, text=label, width=22, anchor="w").pack(side="left")
+            var = tk.StringVar(value=str(config[key]))
+            tk.Entry(row, textvariable=var, width=8).pack(side="left", padx=(0, 6))
+            tk.Label(row, text=f"0x{config[key]:02X}", width=6, anchor="w").pack(side="left")
+            self.runtime_config_vars[key] = var
+        tk.Button(config_frame, text="Apply and reload app", command=self.apply_runtime_config).pack(
+            pady=(4, 6)
+        )
 
         self.status_label = tk.Label(self.root, text="Waiting for CAN messages...")
         self.status_label.pack(pady=(0, 10))
@@ -1010,6 +1116,24 @@ class CZoneGui:
                 self.append_log(f"Modbus timeout on breaker {switch_id}; final virtual state {'ON' if after else 'OFF'}")
                 self.czone.heartbeat()
                 self.czone.detailed_status()
+
+    def apply_runtime_config(self):
+        raw_values = {key: var.get().strip() for key, var in self.runtime_config_vars.items()}
+        try:
+            normalized = save_runtime_config(raw_values)
+        except (TypeError, ValueError) as exc:
+            self.append_log(f"Invalid runtime identity settings: {exc}")
+            config = current_runtime_config()
+            for key, var in self.runtime_config_vars.items():
+                var.set(str(config[key]))
+            return
+        for key, var in self.runtime_config_vars.items():
+            var.set(str(normalized[key]))
+        self.append_log(
+            "Runtime identity settings updated; restarting app: "
+            + ", ".join(f"{name}={value}" for name, value in normalized.items())
+        )
+        self.root.after(200, restart_process)
 
     def apply_output_current(self, output_index: int):
         raw = self.current_vars[output_index].get().strip()
@@ -1221,6 +1345,7 @@ class CZoneHeadless:
 
 
 def main():
+    load_runtime_config()
     runtime_dir = os.path.dirname(os.path.abspath(__file__))
     transport, can_details = select_can_transport(runtime_dir)
     current_os = can_details["os"]
