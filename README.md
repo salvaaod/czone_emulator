@@ -146,7 +146,7 @@ When in headless mode:
   - Sets output current (quantized to 0.1 A, clamped to supported range).
 - `POST /api/czone_config`
   - JSON object with any CZone proprietary fields to change, for example `{ "dip_switch": 2, "switch_bank_serial": 29, "instance_130817": 1, "config0_65290": 253, "config1_65290": 15, "config2_65290": 0 }`.
-  - Changes the active CZone proprietary bytes, then immediately transmits PGN `65284`, PGN `65290`, PGN `130817`, and optionally PGN `65283`.
+  - Changes the active CZone proprietary bytes, then immediately transmits PGN `65284`, PGN `65290`, PGN `130817`, and optionally PGN `65283`. The `dip_switch` value is sent in PGN `65284`; `switch_bank_serial` is sent separately in PGN `65290`/`130817`/`65283`.
 - `GET /api/logs`
   - Returns recent log entries.
 

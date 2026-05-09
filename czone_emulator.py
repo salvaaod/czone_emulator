@@ -548,7 +548,10 @@ class CZone:
 
     def heartbeat(self):
         if self.authenticated:
-            data = u16(CZONE_MESSAGE) + bytes([self.czone_switch_bank_serial, 0x0F, self.state, 0x00, 0x00, 0x00])
+            # The CZone configuration UI derives the detected dipswitch setting
+            # from this byte in PGN 65284. Keep it tied to the configurable
+            # CZone DIP/address, not the switch-bank serial.
+            data = u16(CZONE_MESSAGE) + bytes([self.czone_dip_switch, 0x0F, self.state, 0x00, 0x00, 0x00])
         else:
             data = u16(CZONE_MESSAGE) + bytes([0xFF]) + u16(0x0F0F) + u16(0) + bytes([0])
 
@@ -864,7 +867,7 @@ class CZoneWebServer:
 <div class='card'><div id='states'></div><div id='mapping'></div></div>
 <div class='card'><h3>Switches</h3><div id='buttons'></div></div>
 <div class='card'><h3>Output currents (A)</h3><div id='currents'></div></div>
-<div class='card'><h3>CZone proprietary identity/config</h3><p>Edit the CZone-specific bytes that are more likely to affect OEM device-type detection. Applying sends PGN 65284, 65290, 130817, and optionally 65283 immediately.</p><div class='grid' id='czone_fields'></div><button id='apply_czone_config'>Apply CZone config</button><div class='status' id='czone_config_status'></div></div>
+<div class='card'><h3>CZone proprietary identity/config</h3><p>Edit the CZone-specific bytes that are more likely to affect OEM device-type detection. The CZone DIP/address is sent in PGN 65284 so the OEM software detects the selected dipswitch setting; switch-bank serial remains separate for PGN 65290/130817/65283. Applying sends PGN 65284, 65290, 130817, and optionally 65283 immediately.</p><div class='grid' id='czone_fields'></div><button id='apply_czone_config'>Apply CZone config</button><div class='status' id='czone_config_status'></div></div>
 <div class='card'><h3>Logs</h3><pre id='logs'></pre></div>
 <script>
 let uiInit=false;
