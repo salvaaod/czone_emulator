@@ -1,168 +1,171 @@
 # CZone Emulator
 
-A Python-based emulator for a CZone-style switch interface over NMEA 2000/CAN, with Modbus RTU bridging for physical breaker devices.
+Linux-first, headless CZone-style switch interface emulator for NMEA 2000/CAN networks.
 
-It supports:
-- **GUI mode** (Tkinter) for desktop use.
-- **Headless mode** (Flask web UI/API), automatically enabled on Linux when `DISPLAY` is not set.
-- **Two CAN backends**:
-  - **GCAN DLL** (`ECanVci.dll`) for Windows-like USB-CAN adapters.
-  - **SocketCAN** (`python-can`) for Linux.
+The application is designed to run without any desktop display stack: no windows, no Tkinter, and no Windows DLL backend. Runtime interaction is provided through the built-in Flask web server and JSON API.
 
-## What the emulator does
+## What it does
 
-At runtime, the app:
-- Selects CAN transport from environment variables and OS defaults.
-- Opens serial Modbus RTU to poll/write breaker state (switch IDs 1..4).
-- Publishes NMEA 2000 identity/status frames periodically.
-- Maintains virtual switch state and output current values.
-- In headless mode, exposes a web UI and JSON API.
+At runtime, the emulator:
 
-## Installation
+- Opens a Linux SocketCAN interface using `python-can`.
+- Optionally brings the CAN interface up at 250 kbit/s before opening it.
+- Opens a Modbus RTU serial connection to poll and command breaker devices.
+- Publishes NMEA 2000 identity, heartbeat, and detailed CZone status frames.
+- Maintains virtual switch states and adjustable output-current values.
+- Exposes a small Flask web UI plus JSON endpoints for monitoring and control.
 
-## 1) Clone and create a virtual environment
+## Requirements
 
-```bash
-git clone <your-repo-url>
-cd czone_emulator
-python -m venv .venv
-source .venv/bin/activate   # Linux/macOS
-# .venv\Scripts\activate   # Windows PowerShell
-```
+- Linux with SocketCAN support.
+- Python 3.10 or newer.
+- `iproute2` (`ip link ...`) for CAN interface status/setup.
+- Access to a SocketCAN interface, default: `awlink0`.
+- Access to a Modbus RTU serial device, default: `/dev/ttyAS3`.
 
-## 2) Install Python dependencies
+Python packages:
 
 ```bash
 pip install flask pyserial python-can
 ```
 
-Notes:
-- `python-can` is required when using the **SocketCAN** backend.
-- Tkinter is used for GUI mode. On some Linux distros you may need to install system Tk packages.
+## Installation
 
-## 3) Platform prerequisites
+```bash
+git clone <your-repo-url>
+cd czone_emulator
+python -m venv .venv
+source .venv/bin/activate
+pip install flask pyserial python-can
+```
 
-### Windows (GCAN)
-- Ensure `ECanVci.dll` is present (default: same directory as `czone_emulator.py`), or set `GCAN_DLL_PATH`.
-- Ensure your CAN adapter/driver is installed.
+Ensure the Linux user running the emulator has permission to access the CAN network setup and serial device. Depending on your image, this may require running as root, granting `CAP_NET_ADMIN`, or adding the user to the serial device group such as `dialout`.
 
-### Linux (SocketCAN)
-- Ensure SocketCAN tools exist (`iproute2`) and your interface is available (default `awlink0`).
-- The app can auto-bring the interface up unless disabled.
-- Ensure serial-device permissions for your RS485 port (e.g. `/dev/ttyAS3`).
-
-## Usage
-
-Run:
+## Running
 
 ```bash
 python czone_emulator.py
 ```
 
-### Runtime mode selection
+The Flask server starts automatically because headless mode is the only supported runtime mode.
 
-- `HEADLESS=1` forces headless mode.
-- On Linux with no `DISPLAY`, headless mode is selected automatically.
-- Otherwise GUI mode is used.
+Default services and devices:
 
-### Default behavior by OS
+- Web UI/API: `http://0.0.0.0:8080/`
+- CAN interface: `awlink0`
+- CAN bitrate used for auto setup: `250000`
+- Modbus serial port: `/dev/ttyAS3`
+- Modbus serial baudrate: `115200`
 
-- **Windows default**: `CAN_BACKEND=gcan`, serial `SERIAL_PORT=COM8`, `SERIAL_BAUDRATE=115200`.
-- **Linux default**: `CAN_BACKEND=socketcan`, CAN interface `awlink0`, serial COM alias `COM8 -> /dev/ttyAS3`.
-
-## Common startup examples
-
-### Windows example
-
-```bat
-set CAN_BACKEND=gcan
-set SERIAL_PORT=COM8
-set SERIAL_BAUDRATE=115200
-python czone_emulator.py
-```
-
-### Linux GUI example (with DISPLAY)
+A typical explicit Linux startup looks like this:
 
 ```bash
-export CAN_BACKEND=socketcan
 export CAN_CHANNEL=awlink0
 export SERIAL_PORT=/dev/ttyAS3
 export SERIAL_BAUDRATE=115200
-python czone_emulator.py
-```
-
-### Linux headless + web UI example
-
-```bash
-export HEADLESS=1
 export WEB_HOST=0.0.0.0
 export WEB_PORT=8080
-export CAN_BACKEND=socketcan
-export CAN_CHANNEL=awlink0
-export SERIAL_PORT=/dev/ttyAS3
 python czone_emulator.py
 ```
 
-Then open: `http://<host>:8080/`
+Then open:
 
-## Configuration reference
+```text
+http://<host>:8080/
+```
 
-## CAN settings
+## Configuration
 
-- `CAN_BACKEND`: `gcan` or `socketcan`.
-- `CAN_CHANNEL`: SocketCAN interface name (default `awlink0`).
-- `GCAN_DLL_PATH`: path to GCAN DLL.
-- `CAN_AUTO_UP`: Linux SocketCAN auto-link setup (`1` default; falsey: `0`, `false`, `no`).
-- `CAN_BITRATE`: bitrate used when auto-configuring link (default `250000`).
-- `CAN_SEND_TIMEOUT_SECONDS`: send timeout for SocketCAN (default `0.2`).
-- `CAN_SEND_RETRY_DELAY_SECONDS`: retry delay on ENOBUFS (default `0.05`).
-- `CAN_SEND_MAX_RETRIES`: max ENOBUFS retries (default `40`).
+### CAN settings
 
-## Serial/Modbus settings
+- `CAN_CHANNEL`: SocketCAN interface name. Default: `awlink0`.
+- `CAN_AUTO_UP`: Automatically reset/configure/bring up the CAN interface before opening it. Default: `1`. Disable with `0`, `false`, or `no`.
+- `CAN_BITRATE`: Bitrate used when `CAN_AUTO_UP` configures the link. Default: `250000`.
+- `CAN_SEND_TIMEOUT_SECONDS`: SocketCAN send timeout. Default: `0.2`.
+- `CAN_SEND_RETRY_DELAY_SECONDS`: Retry delay when SocketCAN reports ENOBUFS. Default: `0.05`.
+- `CAN_SEND_MAX_RETRIES`: Maximum ENOBUFS retries per CAN frame. Default: `40`.
 
-- `SERIAL_PORT`: configured serial port (default `COM8`).
-- `SERIAL_BAUDRATE`: serial baudrate (default `115200`).
-- `SERIAL_LINUX_DEFAULT_PORT`: Linux default for COM alias fallback (default `/dev/ttyAS3`).
-- `SERIAL_COM_ALIAS_MAP`: Linux COM-to-device mapping list, e.g.:
-  - `COM8=/dev/ttyAS3,COM9=/dev/ttyUSB0`
+### Serial/Modbus settings
 
-## UI/Web settings
+- `SERIAL_PORT`: Serial port for Modbus RTU. Default: `/dev/ttyAS3`.
+- `SERIAL_BAUDRATE`: Serial baudrate. Default: `115200`.
+- `SERIAL_LINUX_DEFAULT_PORT`: Compatibility fallback used when `SERIAL_PORT=COM8`. Default: `/dev/ttyAS3`.
+- `SERIAL_COM_ALIAS_MAP`: Optional comma-separated compatibility alias map, for example `COM8=/dev/ttyAS3,COM9=/dev/ttyUSB0`.
 
-- `HEADLESS`: `1/true/yes` to force headless mode.
-- `WEB_HOST`: Flask bind host in headless mode (default `0.0.0.0`).
-- `WEB_PORT`: Flask bind port in headless mode (default `8080`).
+### Web settings
 
-## Headless HTTP API
+- `WEB_HOST`: Flask bind host. Default: `0.0.0.0`.
+- `WEB_PORT`: Flask bind port. Default: `8080`.
 
-When in headless mode:
+## Web UI and HTTP API
 
-- `GET /api/state`
-  - Returns switch states, DIP switch value, adjustable output currents, and keyboard mappings.
-- `POST /api/toggle`
-  - JSON: `{ "switch_id": 1..4 }`
-  - Toggles a switch and returns updated state.
-- `POST /api/output_current`
-  - JSON: `{ "output_index": 1..4, "amps": <float> }`
-  - Sets output current (quantized to 0.1 A, clamped to supported range).
-- `GET /api/logs`
-  - Returns recent log entries.
+### `GET /`
+
+Returns the lightweight monitoring/control web page.
+
+### `GET /api/state`
+
+Returns switch states, DIP switch value, adjustable output currents, and keyboard mappings.
+
+### `POST /api/toggle`
+
+Toggles a switch and returns the updated state.
+
+Request body:
+
+```json
+{ "switch_id": 1 }
+```
+
+Valid `switch_id` values are `1` through `4`.
+
+### `POST /api/output_current`
+
+Sets an adjustable output current. Values are quantized to 0.1 A and clamped to the supported single-byte range.
+
+Request body:
+
+```json
+{ "output_index": 1, "amps": 3.5 }
+```
+
+Valid `output_index` values are `1` through `4`.
+
+### `GET /api/logs`
+
+Returns recent in-memory log entries.
 
 ## Troubleshooting
 
-- **DLL not found / GCAN startup failure**
-  - Verify `ECanVci.dll` location or set `GCAN_DLL_PATH`.
-- **SocketCAN open failure**
-  - Verify interface exists, permissions, and bitrate.
-  - If needed, set `CAN_AUTO_UP=1` and check `CAN_BITRATE`.
-- **ENOBUFS on Linux CAN send**
-  - App retries automatically; persistent issues usually indicate bus/ack/load problems.
-- **No GUI appears on Linux**
-  - If `DISPLAY` is unset, app intentionally runs headless.
-- **Serial permission denied**
-  - Add user to the proper group (often `dialout`) or adjust udev/device permissions.
+### SocketCAN open failure
+
+- Confirm the interface exists: `ip link show awlink0`.
+- Confirm the process can configure the link if `CAN_AUTO_UP=1`.
+- If the link is managed elsewhere, set `CAN_AUTO_UP=0` and bring it up manually.
+
+Manual setup example:
+
+```bash
+sudo ip link set awlink0 down
+sudo ip link set awlink0 type can bitrate 250000
+sudo ip link set awlink0 up
+```
+
+### ENOBUFS during CAN send
+
+The emulator retries ENOBUFS automatically. Persistent failures usually indicate bus load, missing ACKs, interface driver issues, or wiring/termination problems.
+
+### Serial permission denied
+
+Check the serial device path and permissions. On many distributions the user must be in the `dialout` group, or the device may need a udev rule.
+
+### No web page reachable
+
+- Confirm the process is still running.
+- Confirm `WEB_HOST` and `WEB_PORT`.
+- If connecting remotely, bind to `0.0.0.0` and ensure local firewall rules allow the port.
 
 ## Project files
 
-- `czone_emulator.py` — main application (CAN, CZone protocol, GUI, headless web UI/API, Modbus bridge).
-- `ECanVci.dll` — GCAN DLL used by the Windows backend.
+- `czone_emulator.py` — headless Linux application with SocketCAN, CZone protocol, Flask web UI/API, and Modbus bridge.
 - `CzRaymarineMFDSwitches.ino` — related firmware/example artifact.

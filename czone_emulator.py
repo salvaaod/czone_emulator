@@ -1,12 +1,9 @@
-import ctypes
 from errno import ENOBUFS
 import os
-import platform
 import struct
 import subprocess
 import threading
 import time
-import tkinter as tk
 from flask import Flask, jsonify, request
 from queue import Empty, Queue
 from dataclasses import dataclass
@@ -15,13 +12,6 @@ from typing import Callable, Optional, Protocol
 import serial
 
 # ---------------- CONFIG ----------------
-
-USBCAN_II = 4
-DEVICE_INDEX = 0
-CAN_INDEX = 0
-
-TIMING0_250K = 0x01
-TIMING1_250K = 0x1C
 
 SRC = 20
 
@@ -60,7 +50,7 @@ OUTPUT_COUNT = 6
 ADJUSTABLE_OUTPUT_COUNT = 4
 CURRENT_STEP_AMPS = 0.1
 LOG_TX_130817_DETAILED_CURRENTS = False
-MODBUS_DEFAULT_COM_PORT = "COM8"
+MODBUS_DEFAULT_COM_PORT = "/dev/ttyAS3"
 MODBUS_BAUDRATE = 115200
 MODBUS_POLL_INTERVAL_SECONDS = 0.25
 MODBUS_STATUS_REGISTER = 0x8000
@@ -69,41 +59,20 @@ MODBUS_ACTION_TIMEOUT_SECONDS = 5.0
 MODBUS_INTER_FRAME_GAP_SECONDS = 0.005
 KEYBOARD_SWITCH_MAPS = {
     1:   {0x05: 1, 0x06: 2, 0x07: 3, 0x08: 4},
-    192: {0x05: 1, 0x06: 2, 0x07: 3, 0x08: 4},
+    8:   {0x07: 1, 0x08: 2, 0x09: 3, 0x0A: 4},
     32:  {0x05: 1, 0x06: 2, 0x07: 3, 0x08: 4},
 #   255: {0x05: 1, 0x06: 2, 0x07: 3, 0x08: 4},
 }
 
-# ---------------- CAN STRUCTS ----------------
+# ---------------- CAN TRANSPORT ----------------
 
 
-class CAN_OBJ(ctypes.Structure):
-    _fields_ = [
-        ("ID", ctypes.c_uint),
-        ("TimeStamp", ctypes.c_uint),
-        ("TimeFlag", ctypes.c_ubyte),
-        ("SendType", ctypes.c_ubyte),
-        ("RemoteFlag", ctypes.c_ubyte),
-        ("ExternFlag", ctypes.c_ubyte),
-        ("DataLen", ctypes.c_ubyte),
-        ("Data", ctypes.c_ubyte * 8),
-        ("Reserved", ctypes.c_ubyte * 3),
-    ]
-
-
-class INIT_CONFIG(ctypes.Structure):
-    _fields_ = [
-        ("AccCode", ctypes.c_uint),
-        ("AccMask", ctypes.c_uint),
-        ("Reserved", ctypes.c_uint),
-        ("Filter", ctypes.c_ubyte),
-        ("Timing0", ctypes.c_ubyte),
-        ("Timing1", ctypes.c_ubyte),
-        ("Mode", ctypes.c_ubyte),
-    ]
-
-
-# ---------------- GCAN DRIVER ----------------
+@dataclass
+class CANFrame:
+    ID: int
+    Data: bytes
+    DataLen: int
+    ExternFlag: int = 1
 
 
 class CANTransport(Protocol):
@@ -111,80 +80,6 @@ class CANTransport(Protocol):
     def send(self, can_id, data: bytes): ...
     def recv(self): ...
     def close(self): ...
-
-
-class GCAN:
-    def __init__(self, dll_path: str):
-        dll_path = os.path.abspath(dll_path)
-
-        if not os.path.exists(dll_path):
-            raise FileNotFoundError(f"DLL not found: {dll_path}")
-
-        print(f"Loading DLL from: {dll_path}")
-
-        self.dll = ctypes.WinDLL(dll_path)
-
-        self.dll.OpenDevice.argtypes = [ctypes.c_uint, ctypes.c_uint, ctypes.c_uint]
-        self.dll.InitCAN.argtypes = [ctypes.c_uint, ctypes.c_uint, ctypes.c_uint, ctypes.POINTER(INIT_CONFIG)]
-        self.dll.StartCAN.argtypes = [ctypes.c_uint, ctypes.c_uint, ctypes.c_uint]
-
-        self.dll.Transmit.argtypes = [
-            ctypes.c_uint,
-            ctypes.c_uint,
-            ctypes.c_uint,
-            ctypes.POINTER(CAN_OBJ),
-            ctypes.c_ulong,
-        ]
-
-        self.dll.Receive.argtypes = [
-            ctypes.c_uint,
-            ctypes.c_uint,
-            ctypes.c_uint,
-            ctypes.POINTER(CAN_OBJ),
-            ctypes.c_ulong,
-            ctypes.c_int,
-        ]
-
-    def open(self):
-        if self.dll.OpenDevice(USBCAN_II, DEVICE_INDEX, 0) == 0:
-            raise RuntimeError("OpenDevice failed")
-
-        cfg = INIT_CONFIG(
-            AccCode=0,
-            AccMask=0xFFFFFFFF,
-            Reserved=0,
-            Filter=0,
-            Timing0=TIMING0_250K,
-            Timing1=TIMING1_250K,
-            Mode=0,
-        )
-
-        if self.dll.InitCAN(USBCAN_II, DEVICE_INDEX, CAN_INDEX, ctypes.byref(cfg)) == 0:
-            raise RuntimeError("InitCAN failed")
-
-        if self.dll.StartCAN(USBCAN_II, DEVICE_INDEX, CAN_INDEX) == 0:
-            raise RuntimeError("StartCAN failed")
-
-        print("GCAN device opened successfully")
-
-    def send(self, can_id, data: bytes):
-        obj = CAN_OBJ()
-        obj.ID = can_id
-        obj.ExternFlag = 1
-        obj.DataLen = len(data)
-
-        for i, b in enumerate(data):
-            obj.Data[i] = b
-
-        self.dll.Transmit(USBCAN_II, DEVICE_INDEX, CAN_INDEX, ctypes.byref(obj), 1)
-
-    def recv(self):
-        buffer = (CAN_OBJ * 50)()
-        count = self.dll.Receive(USBCAN_II, DEVICE_INDEX, CAN_INDEX, buffer, 50, 0)
-        return buffer[:count]
-
-    def close(self):
-        return
 
 
 class SocketCANTransport:
@@ -263,14 +158,15 @@ class SocketCANTransport:
             msg = self.bus.recv(timeout=0)
             if msg is None:
                 break
-            obj = CAN_OBJ()
-            obj.ID = int(msg.arbitration_id)
-            obj.ExternFlag = 1 if msg.is_extended_id else 0
-            payload = bytes(msg.data)
-            obj.DataLen = len(payload)
-            for i, b in enumerate(payload[:8]):
-                obj.Data[i] = b
-            frames.append(obj)
+            payload = bytes(msg.data)[:8]
+            frames.append(
+                CANFrame(
+                    ID=int(msg.arbitration_id),
+                    Data=payload,
+                    DataLen=len(payload),
+                    ExternFlag=1 if msg.is_extended_id else 0,
+                )
+            )
         return frames
 
     def close(self):
@@ -282,18 +178,12 @@ class SocketCANTransport:
             self.bus = None
 
 
-def resolve_serial_port(configured_port: str, current_os: str) -> str:
-    if current_os == "Windows":
-        return configured_port
-    if current_os != "Linux":
-        return configured_port
-
+def resolve_serial_port(configured_port: str) -> str:
     if configured_port.startswith("/dev/"):
         return configured_port
 
-    default_linux_port = os.getenv("SERIAL_LINUX_DEFAULT_PORT", "/dev/ttyAS3")
     alias_map = {
-        "COM8": default_linux_port,
+        "COM8": os.getenv("SERIAL_LINUX_DEFAULT_PORT", MODBUS_DEFAULT_COM_PORT),
     }
     env_alias = os.getenv("SERIAL_COM_ALIAS_MAP", "")
     for entry in env_alias.split(","):
@@ -302,34 +192,15 @@ def resolve_serial_port(configured_port: str, current_os: str) -> str:
         alias, mapped = entry.split("=", 1)
         alias_map[alias.strip().upper()] = mapped.strip()
 
-    key = configured_port.strip().upper()
-    return alias_map.get(key, configured_port)
+    return alias_map.get(configured_port.strip().upper(), configured_port)
 
 
-def select_can_transport(runtime_dir: str) -> tuple[object, dict[str, str]]:
-    current_os = platform.system()
-    backend = os.getenv("CAN_BACKEND", "").strip().lower()
-    channel = os.getenv("CAN_CHANNEL", "").strip()
-
-    if not backend:
-        backend = "gcan" if current_os == "Windows" else "socketcan" if current_os == "Linux" else "gcan"
-    if backend == "gcan":
-        dll_path = os.getenv("GCAN_DLL_PATH", os.path.join(runtime_dir, "ECanVci.dll"))
-        transport = GCAN(dll_path)
-        details = {"os": current_os, "backend": backend, "can_interface": channel or "n/a", "dll_path": dll_path}
-    elif backend == "socketcan":
-        resolved_channel = channel or "awlink0"
-        transport = SocketCANTransport(resolved_channel)
-        details = {"os": current_os, "backend": backend, "can_interface": resolved_channel, "dll_path": "n/a"}
-    else:
-        raise ValueError(f"Unsupported CAN backend '{backend}'")
-
-    print(
-        f"Startup CAN selection: os={details['os']}, backend={details['backend']}, "
-        f"interface={details['can_interface']}, dll={details['dll_path']}"
-    )
+def select_can_transport() -> tuple[CANTransport, dict[str, str]]:
+    channel = os.getenv("CAN_CHANNEL", "awlink0").strip() or "awlink0"
+    transport = SocketCANTransport(channel)
+    details = {"backend": "socketcan", "can_interface": channel}
+    print(f"Startup CAN selection: backend=socketcan, interface={channel}")
     return transport, details
-
 
 # ---------------- NMEA2000 HELPERS ----------------
 
@@ -846,255 +717,6 @@ setInterval(refresh,1000);refresh();
         self.app.run(host=self.host, port=self.port, debug=False, use_reloader=False)
 
 
-class CZoneGui:
-    def __init__(self, czone: CZone, modbus_port: str, modbus_baudrate: int):
-        self.czone = czone
-        self.root = tk.Tk()
-        self.root.title("CZone Emulator")
-        self.root.resizable(False, False)
-
-        tk.Label(self.root, text="CZone OI Emulator", font=("Arial", 12, "bold")).pack(
-            pady=(10, 4)
-        )
-        dip_frame = tk.Frame(self.root)
-        dip_frame.pack(pady=(0, 6))
-        tk.Label(dip_frame, text=f"CZone DIP Switch: {self.czone.czone_dip_switch}").pack(side="left")
-        tk.Label(self.root, text=self._mapping_summary_text(), justify="left", anchor="w").pack(
-            fill="x", padx=10, pady=(0, 6)
-        )
-
-        self.switches_label = tk.Label(self.root, text="Switch states: S1: OFF    S2: OFF    S3: OFF    S4: OFF")
-        self.switches_label.pack(pady=(0, 14))
-
-        manual_frame = tk.Frame(self.root)
-        manual_frame.pack(pady=(0, 12))
-        tk.Label(manual_frame, text="Manual control:").pack(side="left", padx=(0, 8))
-        self.manual_vars = []
-        for switch_id in range(1, 5):
-            var = tk.BooleanVar(value=False)
-            tk.Checkbutton(
-                manual_frame,
-                text=f"S{switch_id}",
-                variable=var,
-                command=lambda sid=switch_id, v=var: self.set_switch_from_gui(sid, v.get()),
-            ).pack(side="left", padx=(0, 10))
-            self.manual_vars.append(var)
-
-        current_frame = tk.LabelFrame(self.root, text="Output currents (A)")
-        current_frame.pack(pady=(0, 12), padx=8, fill="x")
-        self.current_vars = {}
-        for output_index in range(1, ADJUSTABLE_OUTPUT_COUNT + 1):
-            row = tk.Frame(current_frame)
-            row.pack(fill="x", padx=6, pady=2)
-            tk.Label(row, text=f"Output {output_index}", width=10, anchor="w").pack(side="left")
-            var = tk.StringVar(value=f"{self.czone.get_output_current(output_index):.1f}")
-            spin = tk.Spinbox(
-                row,
-                from_=0.0,
-                to=25.5,
-                increment=0.1,
-                format="%.1f",
-                textvariable=var,
-                width=6,
-                command=lambda idx=output_index: self.apply_output_current(idx),
-            )
-            spin.pack(side="left", padx=(0, 6))
-            spin.bind("<Return>", lambda _, idx=output_index: self.apply_output_current(idx))
-            spin.bind("<FocusOut>", lambda _, idx=output_index: self.apply_output_current(idx))
-            self.current_vars[output_index] = var
-
-        self.status_label = tk.Label(self.root, text="Waiting for CAN messages...")
-        self.status_label.pack(pady=(0, 10))
-
-        self.czone.on_switch_event = self.record_switch_event
-        now = time.time()
-        self.last_heartbeat = now
-        self.last_status = now
-        self.last_n2k_identity = now - 60
-        self.modbus_bridge = ModbusBreakerBridge(port=modbus_port, baudrate=modbus_baudrate)
-        self.modbus_enabled = True
-        self.modbus_requests: Queue = Queue()
-        self.modbus_events: Queue = Queue()
-        self.pending_modbus_actions: dict[int, dict[str, float | bool | None]] = {}
-        self._modbus_running = True
-        self._modbus_thread = threading.Thread(target=self._modbus_worker, daemon=True)
-        self._modbus_thread.start()
-
-    def append_log(self, message: str):
-        print(message)
-
-    def refresh_switch_states(self):
-        states = self.czone.get_switch_states()
-        display = "    ".join(f"S{i + 1}: {'ON' if state else 'OFF'}" for i, state in enumerate(states))
-        self.switches_label.configure(text=f"Switch states: {display}")
-        for i, state in enumerate(states):
-            self.manual_vars[i].set(state)
-
-    def set_switch_from_gui(self, switch_id: int, is_on: bool):
-        switch_code = 0x04 + switch_id
-        updated = self.czone._set_switch(switch_code, is_on)
-        self.append_log(f"Manual switch {switch_id} -> {'ON' if updated else 'OFF'}")
-        self._send_modbus_command(switch_id, updated)
-        self.czone.heartbeat()
-        self.czone.detailed_status()
-        self.refresh_switch_states()
-
-
-
-    def _send_modbus_command(self, switch_id: int, is_on: bool):
-        if not self.modbus_enabled:
-            return
-        self.pending_modbus_actions[switch_id] = {"desired": is_on, "deadline": time.time() + MODBUS_ACTION_TIMEOUT_SECONDS, "last_polled": None}
-        self.modbus_requests.put(("write", switch_id, is_on))
-
-    def _modbus_worker(self):
-        while self._modbus_running:
-            try:
-                req = self.modbus_requests.get(timeout=MODBUS_POLL_INTERVAL_SECONDS)
-            except Empty:
-                req = None
-
-            if req:
-                action, switch_id, is_on = req
-                if action == "write":
-                    try:
-                        ok = self.modbus_bridge.write_command(switch_id, 2 if is_on else 1)
-                    except Exception as exc:
-                        ok = False
-                        self.modbus_events.put(("error", f"Modbus write error breaker {switch_id}: {exc}"))
-                    self.modbus_events.put(("write_ack", switch_id, is_on, ok))
-
-            for switch_id in MODBUS_SWITCH_IDS:
-                try:
-                    value = self.modbus_bridge.read_status(switch_id)
-                except Exception as exc:
-                    self.modbus_events.put(("error", f"Modbus poll error: {exc}"))
-                    self.modbus_enabled = False
-                    return
-                self.modbus_events.put(("status", switch_id, value))
-
-    def _process_modbus_events(self):
-        while True:
-            try:
-                event = self.modbus_events.get_nowait()
-            except Empty:
-                break
-            kind = event[0]
-            if kind == "error":
-                self.append_log(event[1])
-                continue
-            if kind == "write_ack":
-                _, switch_id, is_on, ok = event
-                if not ok:
-                    self.append_log(f"Modbus write failed for breaker {switch_id}")
-                continue
-            _, switch_id, value = event
-            if value is None:
-                continue
-            is_on = value == 2
-            pending = self.pending_modbus_actions.get(switch_id)
-            if pending:
-                pending["last_polled"] = is_on
-                desired = bool(pending["desired"])
-                if is_on == desired:
-                    self.pending_modbus_actions.pop(switch_id, None)
-                else:
-                    # During pending window, keep virtual state at commanded value.
-                    continue
-
-            before = bool(self.czone.state & (1 << (switch_id - 1)))
-            after = self.czone._set_switch(0x04 + switch_id, is_on)
-            if after != before:
-                source_state = {1: "OPEN", 2: "CLOSED", 3: "TRIPPED/LOCKED"}.get(value, f"RAW={value}")
-                self.append_log(f"Modbus breaker {switch_id} status -> {source_state}")
-                self.czone.heartbeat()
-                self.czone.detailed_status()
-
-    def _check_modbus_timeouts(self):
-        now = time.time()
-        expired = [sid for sid, info in self.pending_modbus_actions.items() if now > float(info["deadline"])]
-        for switch_id in expired:
-            info = self.pending_modbus_actions.pop(switch_id)
-            desired = bool(info["desired"])
-            last_polled = info.get("last_polled")
-
-            if desired:
-                final_state = False if last_polled is not True else True
-            else:
-                final_state = True if last_polled is True else False
-
-            before = bool(self.czone.state & (1 << (switch_id - 1)))
-            after = self.czone._set_switch(0x04 + switch_id, final_state)
-            if after != before:
-                self.append_log(f"Modbus timeout on breaker {switch_id}; final virtual state {'ON' if after else 'OFF'}")
-                self.czone.heartbeat()
-                self.czone.detailed_status()
-
-    def apply_output_current(self, output_index: int):
-        raw = self.current_vars[output_index].get().strip()
-        try:
-            amps = float(raw)
-        except ValueError:
-            self.append_log(f"Invalid current '{raw}' for output {output_index}; keeping previous value.")
-            self.current_vars[output_index].set(f"{self.czone.get_output_current(output_index):.1f}")
-            return
-
-        self.czone.set_output_current(output_index, amps)
-        normalized = self.czone.get_output_current(output_index)
-        self.current_vars[output_index].set(f"{normalized:.1f}")
-        self.append_log(f"Manual output {output_index} current -> {normalized:.1f} A")
-        self.czone.detailed_status()
-    def record_switch_event(self, switch_code: int, is_on: bool):
-        switch_id = (switch_code - 0x05) + 1
-        state_text = "ON" if is_on else "OFF"
-        self.append_log(f"Switch {switch_id} (code 0x{switch_code:02X}) -> {state_text}")
-        self._send_modbus_command(switch_id, is_on)
-        self.refresh_switch_states()
-
-    def _mapping_summary_text(self) -> str:
-        segments = []
-        for keyboard_id, mapping in sorted(self.czone.keyboard_switch_maps.items()):
-            mapped = ", ".join(f"{k:02X}->{v}" for k, v in sorted(mapping.items()))
-            segments.append(f"KBD {keyboard_id:03d}: {mapped}")
-        return "Mappings:\n" + "\n".join(segments)
-
-    def poll_can(self):
-        self.czone.process_rx()
-        now = time.time()
-
-        if now - self.last_heartbeat > 2:
-            self.last_heartbeat = now
-            self.czone.heartbeat()
-            self.status_label.configure(text="Heartbeat sent")
-
-        if now - self.last_n2k_identity > 60:
-            self.last_n2k_identity = now
-            self.czone.address_claim()
-            self.czone.product_information()
-
-        if now - self.last_status > 2:
-            self.last_status = now
-            self.czone.detailed_status()
-
-        self._process_modbus_events()
-        self._check_modbus_timeouts()
-        self.refresh_switch_states()
-
-        self.root.after(50, self.poll_can)
-
-    def run(self):
-        print("CZone emulator GUI running...")
-        self.czone.address_claim()
-        self.czone.product_information()
-        self.refresh_switch_states()
-        self.poll_can()
-        self.root.mainloop()
-        self._modbus_running = False
-        if hasattr(self, "_modbus_thread"):
-            self._modbus_thread.join(timeout=0.5)
-        self.modbus_bridge.close()
-
-
 class CZoneHeadless:
     def __init__(self, czone: CZone, logger: AppLogger, modbus_port: str, modbus_baudrate: int):
         self.czone = czone
@@ -1240,20 +862,17 @@ class CZoneHeadless:
 
 
 def main():
-    runtime_dir = os.path.dirname(os.path.abspath(__file__))
-    transport, can_details = select_can_transport(runtime_dir)
-    current_os = can_details["os"]
+    transport, can_details = select_can_transport()
     configured_port = os.getenv("SERIAL_PORT", MODBUS_DEFAULT_COM_PORT)
-    resolved_port = resolve_serial_port(configured_port, current_os)
+    resolved_port = resolve_serial_port(configured_port)
     modbus_baudrate = int(os.getenv("SERIAL_BAUDRATE", str(MODBUS_BAUDRATE)))
 
     try:
         transport.open()
     except Exception as exc:
         raise RuntimeError(
-            f"CAN open failed (os={current_os}, backend={can_details['backend']}, "
-            f"interface={can_details['can_interface']}, serial_port={resolved_port}, "
-            f"baudrate={modbus_baudrate}): {exc}"
+            f"SocketCAN open failed (interface={can_details['can_interface']}, "
+            f"serial_port={resolved_port}, baudrate={modbus_baudrate}): {exc}"
         ) from exc
 
     print(
@@ -1264,20 +883,15 @@ def main():
     try:
         logger = AppLogger()
         czone = CZone(transport, logger=logger)
-        web_thread = None
-        web_server = None
-        headless = os.getenv("HEADLESS", "").strip().lower() in {"1", "true", "yes"}
-        if platform.system() == "Linux" and not os.getenv("DISPLAY"):
-            headless = True
-        print(f"Startup UI mode: {'headless' if headless else 'gui'}")
-        if headless:
-            web_host = os.getenv("WEB_HOST", "0.0.0.0")
-            web_port = int(os.getenv("WEB_PORT", "8080"))
-            web_server = CZoneWebServer(czone, logger=logger, host=web_host, port=web_port)
-            web_thread = threading.Thread(target=web_server.run, daemon=True)
-            web_thread.start()
+        web_host = os.getenv("WEB_HOST", "0.0.0.0")
+        web_port = int(os.getenv("WEB_PORT", "8080"))
+        web_server = CZoneWebServer(czone, logger=logger, host=web_host, port=web_port)
+        web_thread = threading.Thread(target=web_server.run, daemon=True)
+        web_thread.start()
+        print("Startup UI mode: headless web server only")
+
         # Push presence/status frames immediately after CAN open so reconnects do not
-        # wait for GUI initialization timing.
+        # wait for the first periodic timer.
         for _ in range(3):
             czone.address_claim()
             czone.product_information()
@@ -1285,21 +899,16 @@ def main():
             czone.detailed_status()
             time.sleep(0.1)
 
-        if headless:
-            app = CZoneHeadless(czone, logger=logger, modbus_port=resolved_port, modbus_baudrate=modbus_baudrate)
-        else:
-            app = CZoneGui(czone, modbus_port=resolved_port, modbus_baudrate=modbus_baudrate)
+        app = CZoneHeadless(czone, logger=logger, modbus_port=resolved_port, modbus_baudrate=modbus_baudrate)
         try:
             app.run()
         finally:
-            if hasattr(app, "close"):
-                app.close()
+            app.close()
     finally:
         try:
             transport.close()
         except Exception:
             pass
-
 
 if __name__ == "__main__":
     main()
