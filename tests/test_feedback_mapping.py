@@ -1,6 +1,8 @@
 import sys
+import tempfile
 import types
 import unittest
+from pathlib import Path
 
 flask_stub = types.ModuleType("flask")
 flask_stub.Flask = lambda *args, **kwargs: None
@@ -12,7 +14,43 @@ serial_stub = types.ModuleType("serial")
 serial_stub.Serial = object
 sys.modules.setdefault("serial", serial_stub)
 
-from czone_emulator import CZONE_MESSAGE, CZone, PGN_130817, PGN_65284, SRC, n2k_id, parse_pgn
+from czone_emulator import (
+    CZONE_MESSAGE,
+    CZone,
+    PGN_130817,
+    PGN_65284,
+    SRC,
+    n2k_id,
+    parse_pgn,
+    sanitize_config_filename,
+    save_zcf_config_file,
+)
+
+
+class DummyUpload:
+    def __init__(self, filename, content=b"configuration"):
+        self.filename = filename
+        self.content = content
+
+    def save(self, path):
+        Path(path).write_bytes(self.content)
+
+
+class ConfigFileUploadTest(unittest.TestCase):
+    def test_sanitizes_uploaded_config_filename(self):
+        self.assertEqual(sanitize_config_filename(r"..\nested/Marine Panel!.zcf"), "Marine Panel_.zcf")
+
+    def test_saves_zcf_file_to_target_directory(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            saved_path = save_zcf_config_file(DummyUpload("panel.zcf", b"zcf-data"), target_dir=tmpdir)
+
+            self.assertEqual(saved_path, Path(tmpdir) / "panel.zcf")
+            self.assertEqual(saved_path.read_bytes(), b"zcf-data")
+
+    def test_rejects_non_zcf_file(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            with self.assertRaisesRegex(ValueError, r"\.zcf"):
+                save_zcf_config_file(DummyUpload("panel.txt"), target_dir=tmpdir)
 
 
 class DummyTransport:
