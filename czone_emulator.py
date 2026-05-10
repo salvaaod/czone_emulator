@@ -1393,11 +1393,11 @@ class CZoneWebServer:
         def index():
             return """<!doctype html>
 <html><head><meta charset='utf-8'><title>CZone Emulator</title>
-<style>body{font-family:Arial,sans-serif;margin:16px}button{padding:8px;margin:4px}.on{background:#2e7d32;color:#fff}.off{background:#c62828;color:#fff}.card{border:1px solid #ccc;border-radius:8px;padding:10px;margin-bottom:10px}label{display:inline-block;min-width:110px}input[type=number]{width:90px}pre{background:#111;color:#d7ffd7;padding:8px;white-space:pre-wrap;line-height:1.25em}</style></head>
+<style>body{font-family:Arial,sans-serif;margin:12px}h2,h3{margin:0 0 8px}.card{border:1px solid #ccc;border-radius:8px;padding:8px;margin-bottom:8px}button{padding:6px 8px;margin:2px 4px}.on{background:#2e7d32;color:#fff}.off{background:#c62828;color:#fff}.muted{color:#555}.mapping-line{white-space:nowrap;overflow-x:auto}.current-row{display:flex;align-items:center;gap:8px;flex-wrap:wrap}.current-field{display:inline-flex;align-items:center;gap:4px}label{display:inline-block}input[type=number]{width:52px}pre{background:#111;color:#d7ffd7;padding:8px;white-space:pre-wrap;line-height:1.25em}</style></head>
 <body><h2>CZone OI Emulator (Headless Web)</h2>
 <div class='card'><div id='states'></div><div id='mapping'></div></div>
 <div class='card'><h3>Switches</h3><div id='buttons'></div></div>
-<div class='card'><h3>Output currents (A)</h3><div id='currents'></div></div>
+<div class='card'><h3>Output currents (A)</h3><div id='currents' class='current-row'></div></div>
 <div class='card'><h3>Configuration file</h3><form id='config_form'><input id='config_file' name='config_file' type='file' accept='.zcf'><button type='submit'>Load .zcf</button></form><div id='config_status'></div></div>
 <div class='card'><h3>Logs</h3><pre id='logs'></pre></div>
 <script>
@@ -1407,14 +1407,18 @@ if(uiInit) return;
 const b=document.getElementById('buttons');
 s.switch_states.forEach((_,i)=>{const id=i+1;const btn=document.createElement('button');btn.id=`sw_${id}`;btn.onclick=()=>fetch('/api/toggle',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({switch_id:id})}).then(refresh);b.appendChild(btn);});
 const c=document.getElementById('currents');
-Object.entries(s.output_currents).forEach(([k,val])=>{const row=document.createElement('div');row.style.margin='5px 0';row.innerHTML=`<label>Output ${k}</label><input step='0.1' min='0' max='25.5' type='number' id='out_${k}' value='${Number(val).toFixed(1)}'><button id='apply_${k}'>Apply</button>`;row.querySelector('button').onclick=()=>{const amps=parseFloat(document.getElementById(`out_${k}`).value||'0');fetch('/api/output_current',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({output_index:Number(k),amps:amps})}).then(refresh)};c.appendChild(row);});
+Object.entries(s.output_currents).forEach(([k,val])=>{const field=document.createElement('span');field.className='current-field';field.innerHTML=`<label for='out_${k}'>O${k}</label><input step='0.1' min='0' max='25.5' type='number' id='out_${k}' value='${Number(val).toFixed(1)}'>`;c.appendChild(field);});
+const applyCurrents=document.createElement('button');applyCurrents.id='apply_currents';applyCurrents.textContent='Apply currents';applyCurrents.onclick=()=>{const amps={};Object.keys(s.output_currents).forEach((k)=>{amps[k]=parseFloat(document.getElementById(`out_${k}`).value||'0');});fetch('/api/output_currents',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({amps:amps})}).then(refresh);};c.appendChild(applyCurrents);
 const form=document.getElementById('config_form');
 form.onsubmit=async (event)=>{event.preventDefault();const status=document.getElementById('config_status');const input=document.getElementById('config_file');if(!input.files.length){status.textContent='Choose a .zcf file first.';return;}const data=new FormData();data.append('config_file',input.files[0]);const response=await fetch('/api/config/upload',{method:'POST',body:data});const result=await response.json();status.textContent=response.ok?`Saved ${result.filename} (${result.config_file?.internal_name||'unknown name'}, ${result.config_file?.size_label||'unknown size'}). Configuration applied without restarting.`:(result.error||'Upload failed');if(response.ok){input.value='';refresh();}};
 uiInit=true;
 }
 async function refresh(){const s=await (await fetch('/api/state')).json();const l=await (await fetch('/api/logs')).json();ensureUi(s);
 const st=s.switch_states.map((v,i)=>`S${i+1}: ${v?'ON':'OFF'}`).join(' | ');document.getElementById('states').innerText=`DIP: ${s.czone_dip_switch}   ${st}`;
-const mapLines=Object.entries(s.mappings).map(([circuit,loads])=>`${circuit}: `+loads.join(', '));const cfg=s.mapping_config_status||{};const file=cfg.config_file||{};const fileText=file.exists?`\\nConfiguration file: ${file.filename||file.configured_filename} | Internal name: ${file.internal_name||file.metadata_error||'unknown'} | Size: ${file.size_label||file.size_bytes||'unknown'}`:'\\nConfiguration file: not found';document.getElementById('mapping').innerText=`Mapping source: ${cfg.message||'Unknown'}${fileText}\\nCircuit load mappings:\\n`+mapLines.join('\\n');
+const mapLines=Object.entries(s.mappings).map(([circuit,loads])=>`${circuit}: `+loads.join(', '));const cfg=s.mapping_config_status||{};const file=cfg.config_file||{};const fileName=file.filename||file.configured_filename;const sourceText=(cfg.message||'Unknown').replace(fileName?` from ${fileName}.`:'','');const fileText=file.exists?`Configuration file: ${fileName} | Internal name: ${file.internal_name||file.metadata_error||'unknown'} | Size: ${file.size_label||file.size_bytes||'unknown'}`:'Configuration file: not found';const mapping=document.getElementById('mapping');mapping.textContent='';
+const mappingStatus=document.createElement('div');mappingStatus.className='mapping-line';mappingStatus.textContent=`Mapping source: ${sourceText}`;mapping.appendChild(mappingStatus);
+const mappingFile=document.createElement('div');mappingFile.className='mapping-line';mappingFile.textContent=fileText;mapping.appendChild(mappingFile);
+const mappingLoads=document.createElement('div');mappingLoads.className='mapping-line';mappingLoads.textContent=`Circuit load mappings: ${mapLines.join(' | ')}`;mapping.appendChild(mappingLoads);
 s.switch_states.forEach((v,i)=>{const id=i+1;const btn=document.getElementById(`sw_${id}`);btn.className=v?'on':'off';btn.textContent=`Toggle S${id} (${v?'ON':'OFF'})`;});
 Object.entries(s.output_currents).forEach(([k,val])=>{const input=document.getElementById(`out_${k}`);if(document.activeElement!==input){input.value=Number(val).toFixed(1);}});
 document.getElementById('logs').textContent=(l.logs||[]).slice(-50).join('\\n');}
@@ -1465,6 +1469,26 @@ setInterval(refresh,1000);refresh();
             self.logger.log(f"Web output {output_index} current -> {normalized:.1f} A")
             self.czone.detailed_status()
             return jsonify({'output_index': output_index, 'amps': normalized})
+
+        @self.app.post('/api/output_currents')
+        def set_output_currents():
+            payload = request.get_json(silent=True) or {}
+            requested_amps = payload.get('amps', {})
+            if not isinstance(requested_amps, dict):
+                return jsonify({'error': 'amps must be an object keyed by output index'}), 400
+            updated_currents = {}
+            for output_index in range(1, ADJUSTABLE_OUTPUT_COUNT + 1):
+                key = str(output_index)
+                if key not in requested_amps:
+                    continue
+                self.czone.set_output_current(output_index, float(requested_amps[key]))
+                updated_currents[key] = self.czone.get_output_current(output_index)
+            self.logger.log(
+                "Web output currents -> "
+                + ", ".join(f"O{k}={v:.1f} A" for k, v in updated_currents.items())
+            )
+            self.czone.detailed_status()
+            return jsonify({'output_currents': updated_currents})
 
         @self.app.post('/api/config/upload')
         def upload_config_file():
