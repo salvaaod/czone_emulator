@@ -66,6 +66,7 @@ CIRCUIT_LOAD_MAPS = {
     0x08: 4,
 }
 CONFIG_FILE_EXTENSION = ".zcf"
+CONFIG_FILENAME = "configuration.zcf"
 CONFIG_FILENAME_SAFE_CHARS = re.compile(r"[^A-Za-z0-9._ -]+")
 
 
@@ -84,7 +85,7 @@ def save_zcf_config_file(uploaded_file, target_dir: str | os.PathLike[str] | Non
         raise ValueError("Configuration file must have a .zcf extension")
 
     destination_dir = Path(target_dir) if target_dir is not None else Path.cwd()
-    destination_path = destination_dir / filename
+    destination_path = destination_dir / CONFIG_FILENAME
     uploaded_file.save(str(destination_path))
     return destination_path
 
