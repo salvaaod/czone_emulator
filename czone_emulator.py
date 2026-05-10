@@ -60,10 +60,10 @@ MODBUS_SWITCH_IDS = (1, 2, 3, 4)
 MODBUS_ACTION_TIMEOUT_SECONDS = 5.0
 MODBUS_INTER_FRAME_GAP_SECONDS = 0.005
 CIRCUIT_LOAD_MAPS = {
-    0x07: 1,
-    0x08: 2,
-    0x09: 3,
-    0x0A: 4,
+    0x05: 1,
+    0x06: 2,
+    0x07: 3,
+    0x08: 4,
 }
 CONFIG_FILE_EXTENSION = ".zcf"
 CONFIG_FILENAME_SAFE_CHARS = re.compile(r"[^A-Za-z0-9._ -]+")
