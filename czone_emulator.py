@@ -3,7 +3,6 @@ import os
 import re
 import struct
 import subprocess
-import sys
 import threading
 import time
 from flask import Flask, jsonify, request
@@ -224,14 +223,6 @@ def zcf_config_file_info(path: str | os.PathLike[str] = CONFIG_FILENAME) -> dict
         info["recognized"] = False
         info["metadata_error"] = str(exc)
     return info
-
-
-def schedule_program_restart(delay_seconds: float = 0.5) -> None:
-    def restart() -> None:
-        time.sleep(delay_seconds)
-        os.execv(sys.executable, [sys.executable, *sys.argv])
-
-    threading.Thread(target=restart, daemon=True).start()
 
 
 class CZoneOutputMappingDecoder:
@@ -911,10 +902,8 @@ class CZoneNetworkConfigReceiver:
 
         file_data = b"".join(self.chunks[i] for i in range(final_block_no))
         saved_path = save_zcf_config_bytes(file_data)
-        _, status = load_circuit_load_maps_from_config(saved_path, self.czone.czone_dip_switch)
-        self.czone.mapping_config_status = status
         self._log(f"Saved CZone configuration.zcf from network: {saved_path} ({len(file_data)} bytes)")
-        self._log(status["message"])
+        status = self.czone.apply_configuration_file(saved_path, reset_runtime=True, announce=True)
         return saved_path, status
 
 
@@ -978,6 +967,32 @@ class CZone:
     @staticmethod
     def _normalize_byte(value: int) -> int:
         return max(0, min(255, int(value)))
+
+    def apply_configuration_file(
+        self,
+        config_path: str | os.PathLike[str] = CONFIG_FILENAME,
+        reset_runtime: bool = True,
+        announce: bool = True,
+    ) -> dict[str, Any]:
+        circuit_load_maps, status = load_circuit_load_maps_from_config(config_path, self.czone_dip_switch)
+        self.circuit_load_maps = self._normalize_circuit_load_maps(circuit_load_maps)
+        self.mapping_config_status = status
+        self.pending_commands.clear()
+
+        if reset_runtime:
+            self.authenticated = True
+            self.state = 0
+            self.output_current_tenths = {idx: 0 for idx in range(1, OUTPUT_COUNT + 1)}
+            self.output_block_overrides.clear()
+            self._log("CZone runtime state reset after configuration load without process restart")
+
+        self._log(status["message"])
+        if announce:
+            self.address_claim()
+            self.product_information()
+            self.heartbeat()
+            self.detailed_status()
+        return status
 
     def set_output_current_tenths(self, output_index: int, value: int):
         if not (1 <= output_index <= OUTPUT_COUNT):
@@ -1365,13 +1380,11 @@ class CZoneWebServer:
         logger: AppLogger,
         host: str = '0.0.0.0',
         port: int = 8080,
-        restart_callback: Callable[[], None] = schedule_program_restart,
     ):
         self.czone = czone
         self.logger = logger
         self.host = host
         self.port = port
-        self.restart_callback = restart_callback
         self.app = Flask(__name__)
         self._setup_routes()
 
@@ -1396,7 +1409,7 @@ s.switch_states.forEach((_,i)=>{const id=i+1;const btn=document.createElement('b
 const c=document.getElementById('currents');
 Object.entries(s.output_currents).forEach(([k,val])=>{const row=document.createElement('div');row.style.margin='5px 0';row.innerHTML=`<label>Output ${k}</label><input step='0.1' min='0' max='25.5' type='number' id='out_${k}' value='${Number(val).toFixed(1)}'><button id='apply_${k}'>Apply</button>`;row.querySelector('button').onclick=()=>{const amps=parseFloat(document.getElementById(`out_${k}`).value||'0');fetch('/api/output_current',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({output_index:Number(k),amps:amps})}).then(refresh)};c.appendChild(row);});
 const form=document.getElementById('config_form');
-form.onsubmit=async (event)=>{event.preventDefault();const status=document.getElementById('config_status');const input=document.getElementById('config_file');if(!input.files.length){status.textContent='Choose a .zcf file first.';return;}const data=new FormData();data.append('config_file',input.files[0]);const response=await fetch('/api/config/upload',{method:'POST',body:data});const result=await response.json();status.textContent=response.ok?`Saved ${result.filename} (${result.config_file?.internal_name||'unknown name'}, ${result.config_file?.size_label||'unknown size'}). Restarting emulator to ingest configuration...`:(result.error||'Upload failed');if(response.ok){input.value='';refresh();}};
+form.onsubmit=async (event)=>{event.preventDefault();const status=document.getElementById('config_status');const input=document.getElementById('config_file');if(!input.files.length){status.textContent='Choose a .zcf file first.';return;}const data=new FormData();data.append('config_file',input.files[0]);const response=await fetch('/api/config/upload',{method:'POST',body:data});const result=await response.json();status.textContent=response.ok?`Saved ${result.filename} (${result.config_file?.internal_name||'unknown name'}, ${result.config_file?.size_label||'unknown size'}). Configuration applied without restarting.`:(result.error||'Upload failed');if(response.ok){input.value='';refresh();}};
 uiInit=true;
 }
 async function refresh(){const s=await (await fetch('/api/state')).json();const l=await (await fetch('/api/logs')).json();ensureUi(s);
@@ -1462,17 +1475,16 @@ setInterval(refresh,1000);refresh();
                 saved_path = save_zcf_config_file(uploaded_file)
             except ValueError as exc:
                 return jsonify({'error': str(exc)}), 400
-            _, status = load_circuit_load_maps_from_config(saved_path, self.czone.czone_dip_switch)
-            self.czone.mapping_config_status = status
             self.logger.log(f"Web configuration file loaded: {saved_path.name} saved to {saved_path}")
-            self.logger.log("Restarting emulator to ingest uploaded configuration.zcf")
-            self.restart_callback()
+            status = self.czone.apply_configuration_file(saved_path, reset_runtime=True, announce=True)
+            self.logger.log("Uploaded configuration applied without restarting emulator")
             return jsonify({
                 'filename': saved_path.name,
                 'path': str(saved_path),
                 'mapping_config_status': status,
                 'config_file': status.get('config_file', zcf_config_file_info(saved_path)),
-                'restart_scheduled': True,
+                'restart_scheduled': False,
+                'applied_without_restart': True,
             })
 
         @self.app.get('/api/logs')
@@ -1653,8 +1665,7 @@ def main():
 
         def handle_network_config_saved(saved_path: Path, _status: dict[str, Any]) -> None:
             logger.log(f"Network configuration file loaded: {saved_path.name} saved to {saved_path}")
-            logger.log("Restarting emulator to ingest received configuration.zcf")
-            schedule_program_restart()
+            logger.log("Received configuration applied without restarting emulator")
 
         czone = CZone(
             transport,
