@@ -40,11 +40,11 @@ class ConfigFileUploadTest(unittest.TestCase):
     def test_sanitizes_uploaded_config_filename(self):
         self.assertEqual(sanitize_config_filename(r"..\nested/Marine Panel!.zcf"), "Marine Panel_.zcf")
 
-    def test_saves_zcf_file_to_target_directory(self):
+    def test_saves_zcf_file_as_configuration_zcf(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             saved_path = save_zcf_config_file(DummyUpload("panel.zcf", b"zcf-data"), target_dir=tmpdir)
 
-            self.assertEqual(saved_path, Path(tmpdir) / "panel.zcf")
+            self.assertEqual(saved_path, Path(tmpdir) / "configuration.zcf")
             self.assertEqual(saved_path.read_bytes(), b"zcf-data")
 
     def test_rejects_non_zcf_file(self):
