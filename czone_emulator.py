@@ -685,7 +685,7 @@ uiInit=true;
 }
 async function refresh(){const s=await (await fetch('/api/state')).json();const l=await (await fetch('/api/logs')).json();ensureUi(s);
 const st=s.switch_states.map((v,i)=>`S${i+1}: ${v?'ON':'OFF'}`).join(' | ');document.getElementById('states').innerText=`DIP: ${s.czone_dip_switch}   ${st}`;
-const mapLines=Object.entries(s.mappings).map(([circuit,loads])=>`${circuit}: `+loads.join(', '));document.getElementById('mapping').innerText='Circuit load mappings:\n'+mapLines.join('\n');
+const mapLines=Object.entries(s.mappings).map(([circuit,loads])=>`${circuit}: `+loads.join(', '));document.getElementById('mapping').innerText='Circuit load mappings:\\n'+mapLines.join('\\n');
 s.switch_states.forEach((v,i)=>{const id=i+1;const btn=document.getElementById(`sw_${id}`);btn.className=v?'on':'off';btn.textContent=`Toggle S${id} (${v?'ON':'OFF'})`;});
 Object.entries(s.output_currents).forEach(([k,val])=>{const input=document.getElementById(`out_${k}`);if(document.activeElement!==input){input.value=Number(val).toFixed(1);}});
 document.getElementById('logs').textContent=(l.logs||[]).slice(-50).join('\\n');}
