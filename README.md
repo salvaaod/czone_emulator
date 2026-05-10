@@ -158,6 +158,12 @@ Request body:
 
 Valid `output_index` values are `1` through `4`.
 
+### `POST /api/config/upload`
+
+Uploads a CZone configuration file from the web UI and saves it in the current working directory of the running process. Only files with the `.zcf` extension are accepted; uploaded filenames are sanitized before saving.
+
+Request body: multipart form data with a `config_file` file field.
+
 ### `GET /api/logs`
 
 Returns recent in-memory log entries.

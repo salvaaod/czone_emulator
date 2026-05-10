@@ -1,10 +1,12 @@
 from errno import ENOBUFS
 import os
+import re
 import struct
 import subprocess
 import threading
 import time
 from flask import Flask, jsonify, request
+from pathlib import Path
 from queue import Empty, Queue
 from dataclasses import dataclass
 from typing import Callable, Optional, Protocol
@@ -58,11 +60,33 @@ MODBUS_SWITCH_IDS = (1, 2, 3, 4)
 MODBUS_ACTION_TIMEOUT_SECONDS = 5.0
 MODBUS_INTER_FRAME_GAP_SECONDS = 0.005
 CIRCUIT_LOAD_MAPS = {
-    0x05: 1,
-    0x06: 2,
-    0x07: 3,
-    0x08: 4,
+    0x07: 1,
+    0x08: 2,
+    0x09: 3,
+    0x0A: 4,
 }
+CONFIG_FILE_EXTENSION = ".zcf"
+CONFIG_FILENAME_SAFE_CHARS = re.compile(r"[^A-Za-z0-9._ -]+")
+
+
+def sanitize_config_filename(filename: str) -> str:
+    normalized = str(filename or "").replace("\\", "/")
+    name = normalized.rsplit("/", 1)[-1].strip()
+    name = CONFIG_FILENAME_SAFE_CHARS.sub("_", name)
+    return name.strip(". ")
+
+
+def save_zcf_config_file(uploaded_file, target_dir: str | os.PathLike[str] | None = None) -> Path:
+    filename = sanitize_config_filename(getattr(uploaded_file, "filename", ""))
+    if not filename:
+        raise ValueError("Choose a .zcf configuration file to upload")
+    if Path(filename).suffix.lower() != CONFIG_FILE_EXTENSION:
+        raise ValueError("Configuration file must have a .zcf extension")
+
+    destination_dir = Path(target_dir) if target_dir is not None else Path.cwd()
+    destination_path = destination_dir / filename
+    uploaded_file.save(str(destination_path))
+    return destination_path
 
 # ---------------- CAN TRANSPORT ----------------
 
@@ -684,6 +708,7 @@ class CZoneWebServer:
 <div class='card'><div id='states'></div><div id='mapping'></div></div>
 <div class='card'><h3>Switches</h3><div id='buttons'></div></div>
 <div class='card'><h3>Output currents (A)</h3><div id='currents'></div></div>
+<div class='card'><h3>Configuration file</h3><form id='config_form'><input id='config_file' name='config_file' type='file' accept='.zcf'><button type='submit'>Load .zcf</button></form><div id='config_status'></div></div>
 <div class='card'><h3>Logs</h3><pre id='logs'></pre></div>
 <script>
 let uiInit=false;
@@ -693,6 +718,8 @@ const b=document.getElementById('buttons');
 s.switch_states.forEach((_,i)=>{const id=i+1;const btn=document.createElement('button');btn.id=`sw_${id}`;btn.onclick=()=>fetch('/api/toggle',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({switch_id:id})}).then(refresh);b.appendChild(btn);});
 const c=document.getElementById('currents');
 Object.entries(s.output_currents).forEach(([k,val])=>{const row=document.createElement('div');row.style.margin='5px 0';row.innerHTML=`<label>Output ${k}</label><input step='0.1' min='0' max='25.5' type='number' id='out_${k}' value='${Number(val).toFixed(1)}'><button id='apply_${k}'>Apply</button>`;row.querySelector('button').onclick=()=>{const amps=parseFloat(document.getElementById(`out_${k}`).value||'0');fetch('/api/output_current',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({output_index:Number(k),amps:amps})}).then(refresh)};c.appendChild(row);});
+const form=document.getElementById('config_form');
+form.onsubmit=async (event)=>{event.preventDefault();const status=document.getElementById('config_status');const input=document.getElementById('config_file');if(!input.files.length){status.textContent='Choose a .zcf file first.';return;}const data=new FormData();data.append('config_file',input.files[0]);const response=await fetch('/api/config/upload',{method:'POST',body:data});const result=await response.json();status.textContent=response.ok?`Saved ${result.filename} to ${result.path}`:(result.error||'Upload failed');if(response.ok){input.value='';refresh();}};
 uiInit=true;
 }
 async function refresh(){const s=await (await fetch('/api/state')).json();const l=await (await fetch('/api/logs')).json();ensureUi(s);
@@ -747,6 +774,18 @@ setInterval(refresh,1000);refresh();
             self.logger.log(f"Web output {output_index} current -> {normalized:.1f} A")
             self.czone.detailed_status()
             return jsonify({'output_index': output_index, 'amps': normalized})
+
+        @self.app.post('/api/config/upload')
+        def upload_config_file():
+            uploaded_file = request.files.get('config_file')
+            if uploaded_file is None:
+                return jsonify({'error': 'Choose a .zcf configuration file to upload'}), 400
+            try:
+                saved_path = save_zcf_config_file(uploaded_file)
+            except ValueError as exc:
+                return jsonify({'error': str(exc)}), 400
+            self.logger.log(f"Web configuration file loaded: {saved_path.name} saved to {saved_path}")
+            return jsonify({'filename': saved_path.name, 'path': str(saved_path)})
 
         @self.app.get('/api/logs')
         def logs():
