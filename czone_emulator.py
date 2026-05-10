@@ -1394,7 +1394,7 @@ class CZoneWebServer:
             return """<!doctype html>
 <html><head><meta charset='utf-8'><title>CZone Emulator</title>
 <style>body{font-family:Arial,sans-serif;margin:12px}h2,h3{margin:0 0 8px}.card{border:1px solid #ccc;border-radius:8px;padding:8px;margin-bottom:8px}button{padding:6px 8px;margin:2px 4px}.on{background:#2e7d32;color:#fff}.off{background:#c62828;color:#fff}.muted{color:#555}.mapping-line{white-space:nowrap;overflow-x:auto}.current-row{display:flex;align-items:center;gap:8px;flex-wrap:wrap}.current-field{display:inline-flex;align-items:center;gap:4px}label{display:inline-block}input[type=number]{width:52px}pre{background:#111;color:#d7ffd7;padding:8px;white-space:pre-wrap;line-height:1.25em}</style></head>
-<body><h2>CZone OI Emulator (Headless Web)</h2>
+<body><h2>CZone ACOI Emulator (Headless Web)</h2>
 <div class='card'><div id='states'></div><div id='mapping'></div></div>
 <div class='card'><h3>Switches</h3><div id='buttons'></div></div>
 <div class='card'><h3>Output currents (A)</h3><div id='currents' class='current-row'></div></div>
