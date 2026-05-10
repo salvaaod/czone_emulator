@@ -16,15 +16,48 @@ sys.modules.setdefault("serial", serial_stub)
 
 from czone_emulator import (
     CZONE_MESSAGE,
+    CZONE_DIP_SWITCH_DEFAULT,
     CZone,
     PGN_130817,
     PGN_65284,
     SRC,
+    czone_id_from_dip_switch,
+    load_circuit_load_maps_from_config,
     n2k_id,
     parse_pgn,
     sanitize_config_filename,
     save_zcf_config_file,
 )
+
+
+def build_test_zcf(module_byte=2):
+    system_name = b"Test"
+    header = bytearray(b"\x01" + (0).to_bytes(4, "little") + (b"\x00" * 9) + bytes([len(system_name)]) + system_name)
+    module_records = (
+        bytes([0, module_byte]) + (0xFD0F).to_bytes(2, "little") + bytes([2]) + b"OI"
+        + bytes([0, 0x01]) + (0x001D).to_bytes(2, "little") + bytes([2]) + b"KP"
+    )
+    header.extend((2 + len(module_records)).to_bytes(4, "little"))
+    header.extend((2).to_bytes(2, "little"))
+    header.extend(module_records)
+
+    def circuit(circuit_id, name, loads):
+        name_bytes = name.encode("ascii")
+        load_records = b"".join(
+            bytes([output_number - 1, module_byte]) + (0).to_bytes(2, "little") + b"\x00"
+            for output_number in loads
+        )
+        control_payload = (0).to_bytes(2, "little")
+        load_payload = len(loads).to_bytes(2, "little") + load_records
+        return (
+            bytes([circuit_id]) + (b"\x00" * 6) + bytes([len(name_bytes)]) + name_bytes
+            + len(control_payload).to_bytes(4, "little") + control_payload
+            + len(load_payload).to_bytes(4, "little") + load_payload
+        )
+
+    header.extend(circuit(0x21, "Cabin", [1]))
+    header.extend(circuit(0x22, "Galley", [2, 3]))
+    return bytes(header)
 
 
 class DummyUpload:
@@ -51,6 +84,30 @@ class ConfigFileUploadTest(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmpdir:
             with self.assertRaisesRegex(ValueError, r"\.zcf"):
                 save_zcf_config_file(DummyUpload("panel.txt"), target_dir=tmpdir)
+
+
+class ConfigMappingLoadTest(unittest.TestCase):
+    def test_czone_id_is_bit_reversed_dip_switch_byte(self):
+        self.assertEqual(czone_id_from_dip_switch(CZONE_DIP_SWITCH_DEFAULT), "01000000")
+
+    def test_missing_configuration_uses_defaults_with_ui_message(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            maps, status = load_circuit_load_maps_from_config(Path(tmpdir) / "configuration.zcf")
+
+            self.assertEqual(maps, {0x07: 1, 0x08: 2, 0x09: 3, 0x0A: 4})
+            self.assertEqual(status["source"], "default")
+            self.assertIn("not found", status["message"])
+
+    def test_configuration_file_maps_matching_czone_id_circuits_to_outputs(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            config_path = Path(tmpdir) / "configuration.zcf"
+            config_path.write_bytes(build_test_zcf())
+
+            maps, status = load_circuit_load_maps_from_config(config_path, CZONE_DIP_SWITCH_DEFAULT)
+
+            self.assertEqual(maps, {0x21: (1,), 0x22: (2, 3)})
+            self.assertEqual(status["status"], "loaded")
+            self.assertIn("01000000", status["message"])
 
 
 class DummyTransport:
