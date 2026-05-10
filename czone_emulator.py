@@ -57,11 +57,11 @@ MODBUS_STATUS_REGISTER = 0x8000
 MODBUS_SWITCH_IDS = (1, 2, 3, 4)
 MODBUS_ACTION_TIMEOUT_SECONDS = 5.0
 MODBUS_INTER_FRAME_GAP_SECONDS = 0.005
-KEYBOARD_SWITCH_MAPS = {
-    1:   {0x05: 1, 0x06: 2, 0x07: 3, 0x08: 4},
-    8:   {0x07: 1, 0x08: 2, 0x09: 3, 0x0A: 4},
-    32:  {0x05: 1, 0x06: 2, 0x07: 3, 0x08: 4},
-#   255: {0x05: 1, 0x06: 2, 0x07: 3, 0x08: 4},
+CIRCUIT_LOAD_MAPS = {
+    0x05: (1,),
+    0x06: (2, 3),
+    0x07: (3,),
+    0x08: (4,),
 }
 
 # ---------------- CAN TRANSPORT ----------------
@@ -261,7 +261,7 @@ class CZone:
     czone_dip_switch: int = CZONE_DIP_SWITCH_DEFAULT
     heartbeat_value: int = CZONE_HEARTBEAT_VALUE_DEFAULT
     pending_commands: dict[int, int] | None = None
-    keyboard_switch_maps: dict[int, dict[int, int]] | None = None
+    circuit_load_maps: dict[int, int | tuple[int, ...] | list[int] | set[int]] | None = None
 
     def __post_init__(self):
         self.czone_dip_switch = self._normalize_byte(self.czone_dip_switch)
@@ -273,8 +273,9 @@ class CZone:
         )
         if self.pending_commands is None:
             self.pending_commands = {}
-        if self.keyboard_switch_maps is None:
-            self.keyboard_switch_maps = {k: dict(v) for k, v in KEYBOARD_SWITCH_MAPS.items()}
+        if self.circuit_load_maps is None:
+            self.circuit_load_maps = dict(CIRCUIT_LOAD_MAPS)
+        self.circuit_load_maps = self._normalize_circuit_load_maps(self.circuit_load_maps)
         # Default currents are 0.0 A for all outputs at startup.
         # Outputs 5-6 remain reserved and fixed at 0.0 A.
         self.output_current_tenths = {idx: 0 for idx in range(1, OUTPUT_COUNT + 1)}
@@ -424,6 +425,21 @@ class CZone:
     def _set_output(self, output_index: int, is_on: bool) -> bool:
         return self._set_switch(0x04 + output_index, is_on)
 
+    @staticmethod
+    def _normalize_circuit_load_maps(
+        circuit_load_maps: dict[int, int | tuple[int, ...] | list[int] | set[int]],
+    ) -> dict[int, tuple[int, ...]]:
+        normalized = {}
+        for circuit_code, load_indexes in circuit_load_maps.items():
+            if isinstance(load_indexes, int):
+                load_tuple = (load_indexes,)
+            else:
+                load_tuple = tuple(load_indexes)
+            normalized[int(circuit_code)] = tuple(
+                int(load_index) for load_index in load_tuple if 1 <= int(load_index) <= 4
+            )
+        return normalized
+
     def handle_command(self, _src: int, data: bytes):
         sender_czone_id = data[5] if len(data) > 5 else None
         sender_text = str(sender_czone_id) if sender_czone_id is not None else "unknown"
@@ -441,34 +457,46 @@ class CZone:
             self.authenticated = True
             self._log("CZone authenticated (implicit via 65280 command)")
 
-        sw = data[2]
+        circuit_code = data[2]
         cmd = data[6]
-        keyboard_map = self.keyboard_switch_maps.get(sender_czone_id, {})
-        output_index = keyboard_map.get(sw)
+        load_indexes = self.circuit_load_maps.get(circuit_code, ())
 
-        if output_index is None:
+        if not load_indexes:
             self._log(
-                f"RX 65280 ignored: unmapped key 0x{sw:02X} from keyboard CZone ID {sender_text}"
+                f"RX 65280 ignored: unmapped circuit 0x{circuit_code:02X} from CZone ID {sender_text}"
             )
             return
 
         if cmd in (0xF1, 0xF2):
             # Stage command and apply on commit (0x40) to match CZone sequencing.
-            self.pending_commands[sw] = cmd
+            self.pending_commands[circuit_code] = cmd
             desired = cmd == 0xF1
-            self._log(f"RX 65280 staged: switch=0x{sw:02X} desired={'ON' if desired else 'OFF'}")
+            loads_text = ",".join(str(load_index) for load_index in load_indexes)
+            self._log(
+                f"RX 65280 staged: circuit=0x{circuit_code:02X} loads={loads_text} "
+                f"desired={'ON' if desired else 'OFF'}"
+            )
         elif cmd in (0x40, 0x42):
-            staged = self.pending_commands.get(sw)
+            staged = self.pending_commands.get(circuit_code)
+            desired = staged == 0xF1
+            updated_states = []
             if staged in (0xF1, 0xF2):
-                is_on = self._set_output(output_index, staged == 0xF1)
-                self.pending_commands.pop(sw, None)
+                for output_index in load_indexes:
+                    is_on = self._set_output(output_index, desired)
+                    updated_states.append((output_index, is_on))
+                    if self.on_switch_event:
+                        self.on_switch_event(0x04 + output_index, is_on)
+                self.pending_commands.pop(circuit_code, None)
             else:
-                is_on = bool(self.state & (1 << (output_index - 1)))
-            state_text = "ON" if is_on else "OFF"
-            message = f"Output {output_index} <- key 0x{sw:02X} -> {state_text}"
-            self._log(message)
-            if self.on_switch_event:
-                self.on_switch_event(0x04 + output_index, is_on)
+                for output_index in load_indexes:
+                    is_on = bool(self.state & (1 << (output_index - 1)))
+                    updated_states.append((output_index, is_on))
+
+            states_text = ", ".join(
+                f"Output {output_index}={'ON' if is_on else 'OFF'}"
+                for output_index, is_on in updated_states
+            )
+            self._log(f"Circuit 0x{circuit_code:02X} -> {states_text}")
             self.heartbeat()
             self.detailed_status()
         else:
@@ -657,7 +685,7 @@ uiInit=true;
 }
 async function refresh(){const s=await (await fetch('/api/state')).json();const l=await (await fetch('/api/logs')).json();ensureUi(s);
 const st=s.switch_states.map((v,i)=>`S${i+1}: ${v?'ON':'OFF'}`).join(' | ');document.getElementById('states').innerText=`DIP: ${s.czone_dip_switch}   ${st}`;
-const mapLines=Object.entries(s.mappings).map(([kbd,m])=>`KBD ${kbd}: `+Object.entries(m).map(([k,v])=>`${k}->${v}`).join(', '));document.getElementById('mapping').innerText='Mappings:\\n'+mapLines.join('\\n');
+const mapLines=Object.entries(s.mappings).map(([circuit,loads])=>`${circuit}: `+loads.join(', '));document.getElementById('mapping').innerText='Circuit load mappings:\n'+mapLines.join('\n');
 s.switch_states.forEach((v,i)=>{const id=i+1;const btn=document.getElementById(`sw_${id}`);btn.className=v?'on':'off';btn.textContent=`Toggle S${id} (${v?'ON':'OFF'})`;});
 Object.entries(s.output_currents).forEach(([k,val])=>{const input=document.getElementById(`out_${k}`);if(document.activeElement!==input){input.value=Number(val).toFixed(1);}});
 document.getElementById('logs').textContent=(l.logs||[]).slice(-50).join('\\n');}
@@ -675,8 +703,8 @@ setInterval(refresh,1000);refresh();
                     for output_index in range(1, ADJUSTABLE_OUTPUT_COUNT + 1)
                 },
                 'mappings': {
-                    str(keyboard_id): {f"0x{k:02X}": v for k, v in sorted(mapping.items())}
-                    for keyboard_id, mapping in sorted(self.czone.keyboard_switch_maps.items())
+                    f"0x{circuit_code:02X}": list(load_indexes)
+                    for circuit_code, load_indexes in sorted(self.czone.circuit_load_maps.items())
                 },
             })
 
