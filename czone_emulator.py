@@ -3,7 +3,6 @@ import os
 import re
 import struct
 import subprocess
-import sys
 import threading
 import time
 from flask import Flask, jsonify, request
@@ -23,6 +22,7 @@ PGN_59904 = 59904
 PGN_65280 = 65280
 PGN_65284 = 65284
 PGN_65290 = 65290
+PGN_65291 = 65291
 PGN_126996 = 126996
 PGN_130817 = 130817
 
@@ -69,6 +69,8 @@ CIRCUIT_LOAD_MAPS = {
 CONFIG_FILE_EXTENSION = ".zcf"
 CONFIG_FILENAME = "configuration.zcf"
 CONFIG_FILENAME_SAFE_CHARS = re.compile(r"[^A-Za-z0-9._ -]+")
+CZONE_CONFIG_BLOCK_WRAPPER_LEN = 23
+CZONE_CURRENT_CONFIG_ID_FILENAME = "current_config_id.txt"
 
 
 def u16le(data: bytes, off: int) -> int:
@@ -120,6 +122,47 @@ def save_zcf_config_file(uploaded_file, target_dir: str | os.PathLike[str] | Non
     destination_path = destination_dir / CONFIG_FILENAME
     uploaded_file.save(str(destination_path))
     return destination_path
+
+
+def save_zcf_config_bytes(file_data: bytes, target_dir: str | os.PathLike[str] | None = None) -> Path:
+    destination_dir = Path(target_dir) if target_dir is not None else Path.cwd()
+    destination_dir.mkdir(parents=True, exist_ok=True)
+    destination_path = destination_dir / CONFIG_FILENAME
+    temporary_path = destination_path.with_suffix(destination_path.suffix + ".tmp")
+    temporary_path.write_bytes(file_data)
+    temporary_path.replace(destination_path)
+    return destination_path
+
+
+def parse_config_id_text(value: str) -> bytes:
+    text = value.strip().replace("0x", "").replace(" ", "").replace(":", "").replace("-", "")
+    if len(text) != 6:
+        raise ValueError("configuration ID must be exactly 3 bytes")
+    return bytes.fromhex(text)
+
+
+def load_current_config_id(fallback: bytes = b"\x00\x00\x00") -> bytes:
+    env_value = os.getenv("CZONE_CURRENT_CONFIG_ID", "").strip()
+    if env_value:
+        try:
+            return parse_config_id_text(env_value)
+        except ValueError:
+            pass
+    path = Path(CZONE_CURRENT_CONFIG_ID_FILENAME)
+    if not path.exists():
+        return fallback
+    try:
+        return parse_config_id_text(path.read_text(encoding="ascii").strip())
+    except Exception:
+        return fallback
+
+
+def persist_current_config_id(config_id: bytes) -> None:
+    Path(CZONE_CURRENT_CONFIG_ID_FILENAME).write_text(config_id.hex().upper() + "\n", encoding="ascii")
+
+
+def hex_bytes(data: bytes) -> str:
+    return data.hex(" ").upper()
 
 
 def extract_zcf_internal_name_checked(path: str | os.PathLike[str]) -> str:
@@ -180,14 +223,6 @@ def zcf_config_file_info(path: str | os.PathLike[str] = CONFIG_FILENAME) -> dict
         info["recognized"] = False
         info["metadata_error"] = str(exc)
     return info
-
-
-def schedule_program_restart(delay_seconds: float = 0.5) -> None:
-    def restart() -> None:
-        time.sleep(delay_seconds)
-        os.execv(sys.executable, [sys.executable, *sys.argv])
-
-    threading.Thread(target=restart, daemon=True).start()
 
 
 class CZoneOutputMappingDecoder:
@@ -642,6 +677,236 @@ def encode_iso_name() -> bytes:
     return value.to_bytes(8, "little")
 
 
+# ---------------- CZONE CONFIGURATION RECEIVER ----------------
+
+
+class CZoneNetworkConfigReceiver:
+    """Receive configuration.zcf over the CZone PGN 65290/65280/65291 flow."""
+
+    def __init__(
+        self,
+        czone: "CZone",
+        logger: Optional["AppLogger"] = None,
+        on_config_saved: Optional[Callable[[Path, dict[str, Any]], None]] = None,
+        sender_sa: Optional[int] = None,
+        ack_suffix: int = 0x00,
+    ) -> None:
+        self.czone = czone
+        self.logger = logger
+        self.on_config_saved = on_config_saved
+        self.sender_sa = None if sender_sa is None else sender_sa & 0xFF
+        self.ack_suffix = ack_suffix & 0xFF
+        self.current_config_id = load_current_config_id()
+        self.new_config_id: Optional[bytes] = None
+        self.session_active = False
+        self.transfer_sender: Optional[int] = None
+        self.chunks: dict[int, bytes] = {}
+
+        self.fp_active = False
+        self.fp_src: Optional[int] = None
+        self.fp_seq: Optional[int] = None
+        self.fp_expected_len = 0
+        self.fp_next_index = 0
+        self.fp_payload = bytearray()
+
+    def _log(self, message: str) -> None:
+        if self.logger:
+            self.logger.log(message)
+        else:
+            print(message)
+
+    def _debug(self, message: str) -> None:
+        if os.getenv("CZONE_CONFIG_RX_VERBOSE", "0").strip().lower() in {"1", "true", "yes"}:
+            self._log(message)
+
+    def _send_pgn(self, pgn: int, data: bytes, priority: int = 7) -> None:
+        self.czone.send(pgn, data, priority=priority)
+
+    def send_ready_response(self) -> None:
+        data = u16(CZONE_MESSAGE) + self.current_config_id + bytes([0x00, 0x00, self.czone.czone_dip_switch])
+        self._send_pgn(PGN_65290, data)
+        self._log(f"TX PGN 65290 config ready/current: {hex_bytes(data)}")
+
+    def send_block_ack(self, block_no: int, final: bool) -> None:
+        status = 0x01 if final else 0x00
+        data = u16(CZONE_MESSAGE) + bytes([
+            0xFF,
+            status,
+            block_no & 0xFF,
+            0x00,
+            self.czone.czone_dip_switch,
+            self.ack_suffix,
+        ])
+        self._send_pgn(PGN_65291, data)
+        self._log(f"TX PGN 65291 config {'final ' if final else ''}ACK block {block_no}: {hex_bytes(data)}")
+
+    def send_applied_response(self) -> None:
+        if not self.new_config_id:
+            return
+        data = u16(CZONE_MESSAGE) + self.new_config_id + bytes([0x00, 0x40, self.czone.czone_dip_switch])
+        self._send_pgn(PGN_65290, data)
+        self._log(f"TX PGN 65290 config applied: {hex_bytes(data)}")
+
+    def handle_offer(self, src: int, data: bytes) -> bool:
+        if self.sender_sa is not None and src != self.sender_sa:
+            return False
+        if len(data) < 8 or int.from_bytes(data[:2], "little") != CZONE_MESSAGE:
+            return False
+
+        is_offer = data[5] == 0x00 and data[6] == 0xC0 and data[7] == 0xFF
+        if not is_offer:
+            return False
+
+        self.transfer_sender = src
+        self.new_config_id = bytes(data[2:5])
+        self.session_active = True
+        self.chunks.clear()
+        self.reset_fast_packet()
+
+        self._log(
+            f"RX CZone configuration offer from SA 0x{src:02X}: "
+            f"new_config_id={hex_bytes(self.new_config_id)}"
+        )
+        self.send_ready_response()
+        return True
+
+    def reset_fast_packet(self) -> None:
+        self.fp_active = False
+        self.fp_src = None
+        self.fp_seq = None
+        self.fp_expected_len = 0
+        self.fp_next_index = 0
+        self.fp_payload.clear()
+
+    def handle_data_frame(self, src: int, data: bytes) -> bool:
+        if self.sender_sa is not None and src != self.sender_sa:
+            return False
+        if len(data) < 1:
+            return False
+
+        control = data[0]
+        seq = (control >> 5) & 0x07
+        frame_index = control & 0x1F
+
+        if frame_index == 0:
+            if len(data) < 8:
+                return False
+            total_len = data[1]
+            first_payload = data[2:8]
+            if first_payload[:2] != u16(CZONE_MESSAGE):
+                return False
+            if total_len < CZONE_CONFIG_BLOCK_WRAPPER_LEN:
+                self._debug(f"RX PGN 65280 short config payload len={total_len}; ignoring")
+                return True
+
+            self.fp_active = True
+            self.fp_src = src
+            self.fp_seq = seq
+            self.fp_expected_len = total_len
+            self.fp_next_index = 1
+            self.fp_payload = bytearray(first_payload)
+            self._debug(f"RX config fast-packet start SA=0x{src:02X}, seq={seq}, len={total_len}")
+            self.check_fast_packet_complete(src)
+            return True
+
+        if not self.fp_active:
+            return False
+        if src != self.fp_src or seq != self.fp_seq:
+            self._debug(
+                f"RX config continuation mismatch: expected SA=0x{self.fp_src:02X} seq={self.fp_seq}, "
+                f"got SA=0x{src:02X} seq={seq}"
+            )
+            return True
+        if frame_index != self.fp_next_index:
+            self._log(
+                f"CZone configuration fast-packet gap: expected index {self.fp_next_index}, "
+                f"got {frame_index}; dropping current packet"
+            )
+            self.reset_fast_packet()
+            return True
+
+        self.fp_payload.extend(data[1:8])
+        self.fp_next_index += 1
+        self.check_fast_packet_complete(src)
+        return True
+
+    def check_fast_packet_complete(self, src: int) -> None:
+        if not self.fp_active or len(self.fp_payload) < self.fp_expected_len:
+            return
+        payload = bytes(self.fp_payload[:self.fp_expected_len])
+        self.reset_fast_packet()
+        self.handle_complete_block(src, payload)
+
+    def handle_complete_block(self, src: int, payload: bytes) -> None:
+        if len(payload) < CZONE_CONFIG_BLOCK_WRAPPER_LEN:
+            self._log(f"Ignoring CZone configuration block: too short ({len(payload)} bytes)")
+            return
+        if payload[:2] != u16(CZONE_MESSAGE):
+            self._log("Ignoring CZone configuration block: bad CZone signature")
+            return
+
+        block_no = payload[2]
+        block_type = payload[3]
+        padding = payload[4:CZONE_CONFIG_BLOCK_WRAPPER_LEN]
+        file_chunk = payload[CZONE_CONFIG_BLOCK_WRAPPER_LEN:]
+
+        if block_type != 0x00:
+            self._log(f"CZone configuration block {block_no}: unexpected type 0x{block_type:02X}")
+        if padding != b"\xFF" * 19:
+            self._debug(f"CZone configuration block {block_no}: padding not all FF: {hex_bytes(padding)}")
+        if not self.session_active:
+            self._log("CZone configuration block received without offer; starting receive session")
+            self.session_active = True
+            self.transfer_sender = src
+
+        final_block = len(file_chunk) == 0
+        if final_block:
+            self._log(f"RX CZone configuration terminator block {block_no}")
+            self.send_block_ack(block_no, final=True)
+            saved_path, status = self.save_complete_file(final_block_no=block_no)
+            if saved_path is not None and self.new_config_id:
+                self.current_config_id = self.new_config_id
+                try:
+                    persist_current_config_id(self.current_config_id)
+                    self._log(f"Persisted CZone current_config_id={hex_bytes(self.current_config_id)}")
+                except Exception as exc:
+                    self._log(f"Could not persist CZone current_config_id: {exc}")
+            self.send_applied_response()
+            self.session_active = False
+            if saved_path is not None and self.on_config_saved is not None:
+                self.on_config_saved(saved_path, status)
+            return
+
+        if block_no in self.chunks:
+            self._log(f"RX duplicate CZone configuration block {block_no}; replacing previous data")
+        self.chunks[block_no] = bytes(file_chunk)
+        self._log(
+            f"RX CZone configuration block {block_no}: wrapped={len(payload)} bytes, "
+            f"zcf_data={len(file_chunk)} bytes"
+        )
+        self.send_block_ack(block_no, final=False)
+
+    def save_complete_file(self, final_block_no: int) -> tuple[Optional[Path], dict[str, Any]]:
+        missing = [i for i in range(final_block_no) if i not in self.chunks]
+        if missing:
+            status = {
+                "source": "network",
+                "status": "incomplete",
+                "message": f"Incomplete CZone configuration receive; missing blocks {missing}.",
+                "path": CONFIG_FILENAME,
+                "czone_id": czone_id_from_dip_switch(self.czone.czone_dip_switch),
+                "config_file": zcf_config_file_info(),
+            }
+            self._log(status["message"])
+            return None, status
+
+        file_data = b"".join(self.chunks[i] for i in range(final_block_no))
+        saved_path = save_zcf_config_bytes(file_data)
+        self._log(f"Saved CZone configuration.zcf from network: {saved_path} ({len(file_data)} bytes)")
+        status = self.czone.apply_configuration_file(saved_path, reset_runtime=True, announce=True)
+        return saved_path, status
+
+
 # ---------------- CZONE DEVICE ----------------
 
 
@@ -657,6 +922,7 @@ class CZone:
     pending_commands: dict[int, int] | None = None
     circuit_load_maps: dict[int, int | tuple[int, ...] | list[int] | set[int]] | None = None
     mapping_config_status: dict[str, Any] | None = None
+    on_config_received: Optional[Callable[[Path, dict[str, Any]], None]] = None
 
     def __post_init__(self):
         self.czone_dip_switch = self._normalize_byte(self.czone_dip_switch)
@@ -683,6 +949,17 @@ class CZone:
         # Outputs 5-6 remain reserved and fixed at 0.0 A.
         self.output_current_tenths = {idx: 0 for idx in range(1, OUTPUT_COUNT + 1)}
         self.output_block_overrides: dict[int, tuple[int, int, int, int]] = {}
+        sender_sa_text = os.getenv("CZONE_CONFIG_SENDER_SA", "any").strip().lower()
+        sender_sa = None if sender_sa_text in {"", "any", "*"} else int(sender_sa_text, 0)
+        ack_suffix = int(os.getenv("CZONE_CONFIG_ACK_SUFFIX", "0"), 0)
+        self.config_receiver = CZoneNetworkConfigReceiver(
+            self,
+            logger=self.logger,
+            on_config_saved=self.on_config_received,
+            sender_sa=sender_sa,
+            ack_suffix=ack_suffix,
+        )
+        self._log("CZone network configuration receiver enabled on PGN 65290/65280/65291")
 
     def _normalize_current_tenths(self, value: int) -> int:
         return max(0, min(255, int(value)))
@@ -690,6 +967,32 @@ class CZone:
     @staticmethod
     def _normalize_byte(value: int) -> int:
         return max(0, min(255, int(value)))
+
+    def apply_configuration_file(
+        self,
+        config_path: str | os.PathLike[str] = CONFIG_FILENAME,
+        reset_runtime: bool = True,
+        announce: bool = True,
+    ) -> dict[str, Any]:
+        circuit_load_maps, status = load_circuit_load_maps_from_config(config_path, self.czone_dip_switch)
+        self.circuit_load_maps = self._normalize_circuit_load_maps(circuit_load_maps)
+        self.mapping_config_status = status
+        self.pending_commands.clear()
+
+        if reset_runtime:
+            self.authenticated = True
+            self.state = 0
+            self.output_current_tenths = {idx: 0 for idx in range(1, OUTPUT_COUNT + 1)}
+            self.output_block_overrides.clear()
+            self._log("CZone runtime state reset after configuration load without process restart")
+
+        self._log(status["message"])
+        if announce:
+            self.address_claim()
+            self.product_information()
+            self.heartbeat()
+            self.detailed_status()
+        return status
 
     def set_output_current_tenths(self, output_index: int, value: int):
         if not (1 <= output_index <= OUTPUT_COUNT):
@@ -951,9 +1254,11 @@ class CZone:
             src = parse_src(f.ID)
 
             if pgn == PGN_65280:
-                self.handle_command(src, data)
+                if not self.config_receiver.handle_data_frame(src, data):
+                    self.handle_command(src, data)
             elif pgn == PGN_65290:
-                self.handle_config(src, data)
+                if not self.config_receiver.handle_offer(src, data):
+                    self.handle_config(src, data)
             elif pgn == PGN_59904:
                 self.handle_request(src, data)
 
@@ -1075,13 +1380,11 @@ class CZoneWebServer:
         logger: AppLogger,
         host: str = '0.0.0.0',
         port: int = 8080,
-        restart_callback: Callable[[], None] = schedule_program_restart,
     ):
         self.czone = czone
         self.logger = logger
         self.host = host
         self.port = port
-        self.restart_callback = restart_callback
         self.app = Flask(__name__)
         self._setup_routes()
 
@@ -1106,7 +1409,7 @@ s.switch_states.forEach((_,i)=>{const id=i+1;const btn=document.createElement('b
 const c=document.getElementById('currents');
 Object.entries(s.output_currents).forEach(([k,val])=>{const row=document.createElement('div');row.style.margin='5px 0';row.innerHTML=`<label>Output ${k}</label><input step='0.1' min='0' max='25.5' type='number' id='out_${k}' value='${Number(val).toFixed(1)}'><button id='apply_${k}'>Apply</button>`;row.querySelector('button').onclick=()=>{const amps=parseFloat(document.getElementById(`out_${k}`).value||'0');fetch('/api/output_current',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({output_index:Number(k),amps:amps})}).then(refresh)};c.appendChild(row);});
 const form=document.getElementById('config_form');
-form.onsubmit=async (event)=>{event.preventDefault();const status=document.getElementById('config_status');const input=document.getElementById('config_file');if(!input.files.length){status.textContent='Choose a .zcf file first.';return;}const data=new FormData();data.append('config_file',input.files[0]);const response=await fetch('/api/config/upload',{method:'POST',body:data});const result=await response.json();status.textContent=response.ok?`Saved ${result.filename} (${result.config_file?.internal_name||'unknown name'}, ${result.config_file?.size_label||'unknown size'}). Restarting emulator to ingest configuration...`:(result.error||'Upload failed');if(response.ok){input.value='';refresh();}};
+form.onsubmit=async (event)=>{event.preventDefault();const status=document.getElementById('config_status');const input=document.getElementById('config_file');if(!input.files.length){status.textContent='Choose a .zcf file first.';return;}const data=new FormData();data.append('config_file',input.files[0]);const response=await fetch('/api/config/upload',{method:'POST',body:data});const result=await response.json();status.textContent=response.ok?`Saved ${result.filename} (${result.config_file?.internal_name||'unknown name'}, ${result.config_file?.size_label||'unknown size'}). Configuration applied without restarting.`:(result.error||'Upload failed');if(response.ok){input.value='';refresh();}};
 uiInit=true;
 }
 async function refresh(){const s=await (await fetch('/api/state')).json();const l=await (await fetch('/api/logs')).json();ensureUi(s);
@@ -1172,17 +1475,16 @@ setInterval(refresh,1000);refresh();
                 saved_path = save_zcf_config_file(uploaded_file)
             except ValueError as exc:
                 return jsonify({'error': str(exc)}), 400
-            _, status = load_circuit_load_maps_from_config(saved_path, self.czone.czone_dip_switch)
-            self.czone.mapping_config_status = status
             self.logger.log(f"Web configuration file loaded: {saved_path.name} saved to {saved_path}")
-            self.logger.log("Restarting emulator to ingest uploaded configuration.zcf")
-            self.restart_callback()
+            status = self.czone.apply_configuration_file(saved_path, reset_runtime=True, announce=True)
+            self.logger.log("Uploaded configuration applied without restarting emulator")
             return jsonify({
                 'filename': saved_path.name,
                 'path': str(saved_path),
                 'mapping_config_status': status,
                 'config_file': status.get('config_file', zcf_config_file_info(saved_path)),
-                'restart_scheduled': True,
+                'restart_scheduled': False,
+                'applied_without_restart': True,
             })
 
         @self.app.get('/api/logs')
@@ -1360,7 +1662,18 @@ def main():
     try:
         logger = AppLogger()
         circuit_load_maps, mapping_status = load_circuit_load_maps_from_config()
-        czone = CZone(transport, logger=logger, circuit_load_maps=circuit_load_maps, mapping_config_status=mapping_status)
+
+        def handle_network_config_saved(saved_path: Path, _status: dict[str, Any]) -> None:
+            logger.log(f"Network configuration file loaded: {saved_path.name} saved to {saved_path}")
+            logger.log("Received configuration applied without restarting emulator")
+
+        czone = CZone(
+            transport,
+            logger=logger,
+            circuit_load_maps=circuit_load_maps,
+            mapping_config_status=mapping_status,
+            on_config_received=handle_network_config_saved,
+        )
         logger.log(mapping_status['message'])
         web_host = os.getenv("WEB_HOST", "0.0.0.0")
         web_port = int(os.getenv("WEB_PORT", "8080"))
