@@ -3,13 +3,14 @@ import os
 import re
 import struct
 import subprocess
+import sys
 import threading
 import time
 from flask import Flask, jsonify, request
 from pathlib import Path
 from queue import Empty, Queue
 from dataclasses import dataclass
-from typing import Callable, Optional, Protocol
+from typing import Any, Callable, Optional, Protocol
 
 import serial
 
@@ -60,14 +61,45 @@ MODBUS_SWITCH_IDS = (1, 2, 3, 4)
 MODBUS_ACTION_TIMEOUT_SECONDS = 5.0
 MODBUS_INTER_FRAME_GAP_SECONDS = 0.005
 CIRCUIT_LOAD_MAPS = {
-    0x05: 1,
-    0x06: 2,
-    0x07: 3,
-    0x08: 4,
+    0x07: 1,
+    0x08: 2,
+    0x09: 3,
+    0x0A: 4,
 }
 CONFIG_FILE_EXTENSION = ".zcf"
 CONFIG_FILENAME = "configuration.zcf"
 CONFIG_FILENAME_SAFE_CHARS = re.compile(r"[^A-Za-z0-9._ -]+")
+
+
+def u16le(data: bytes, off: int) -> int:
+    return struct.unpack_from("<H", data, off)[0]
+
+
+def u32le(data: bytes, off: int) -> int:
+    return struct.unpack_from("<I", data, off)[0]
+
+
+def is_printable_ascii(bs: bytes) -> bool:
+    return bool(bs) and all(32 <= b < 127 for b in bs)
+
+
+def czone_id_from_dip_switch(dip_switch: int) -> str:
+    return f"{int(dip_switch) & 0xFF:08b}"[::-1]
+
+
+def output_label(index: int) -> str:
+    return f"DC {index + 1:02d}"
+
+
+def module_kind(name: str, type_id: int) -> str:
+    n = name.upper()
+    if type_id == 0x001D or n.startswith("KP") or "KEY" in n:
+        return "IN/keypad"
+    if type_id == 0x0010 or n.startswith("DI") or "TOUCH" in n or "AXIOM" in n or "AZIOM" in n or "CZONE" in n:
+        return "IN/display"
+    if type_id in (0xFD0F, 0xFE0A, 0x0036) or n.startswith("OI") or "ACOI" in n or "CONTROL X" in n:
+        return "OUT"
+    return "unknown"
 
 
 def sanitize_config_filename(filename: str) -> str:
@@ -88,6 +120,343 @@ def save_zcf_config_file(uploaded_file, target_dir: str | os.PathLike[str] | Non
     destination_path = destination_dir / CONFIG_FILENAME
     uploaded_file.save(str(destination_path))
     return destination_path
+
+
+def extract_zcf_internal_name_checked(path: str | os.PathLike[str]) -> str:
+    data = Path(path).read_bytes()
+
+    if len(data) < 0x10:
+        raise ValueError("File too small")
+
+    if data[0] != 0x06:
+        raise ValueError("Not a recognized ZCF file")
+
+    declared_payload_len = struct.unpack_from("<I", data, 1)[0]
+    expected_payload_len = len(data) - 7
+
+    if declared_payload_len != expected_payload_len:
+        raise ValueError(
+            f"Length mismatch: declared {declared_payload_len}, expected {expected_payload_len}"
+        )
+
+    name_len = data[0x0E]
+    name_start = 0x0F
+    name_end = name_start + name_len
+
+    if name_end > len(data):
+        raise ValueError("Invalid internal name length")
+
+    return data[name_start:name_end].decode("utf-8", errors="replace")
+
+
+def format_file_size(size_bytes: int) -> str:
+    if size_bytes < 1024:
+        return f"{size_bytes} B"
+    if size_bytes < 1024 * 1024:
+        return f"{size_bytes / 1024:.1f} KiB"
+    return f"{size_bytes / (1024 * 1024):.1f} MiB"
+
+
+def zcf_config_file_info(path: str | os.PathLike[str] = CONFIG_FILENAME) -> dict[str, Any]:
+    config_path = Path(path)
+    info: dict[str, Any] = {
+        "configured_filename": CONFIG_FILENAME,
+        "path": str(config_path),
+        "exists": config_path.exists(),
+    }
+    if not config_path.exists():
+        return info
+
+    size_bytes = config_path.stat().st_size
+    info.update({
+        "filename": config_path.name,
+        "size_bytes": size_bytes,
+        "size_label": format_file_size(size_bytes),
+    })
+    try:
+        info["internal_name"] = extract_zcf_internal_name_checked(config_path)
+        info["recognized"] = True
+    except ValueError as exc:
+        info["recognized"] = False
+        info["metadata_error"] = str(exc)
+    return info
+
+
+def schedule_program_restart(delay_seconds: float = 0.5) -> None:
+    def restart() -> None:
+        time.sleep(delay_seconds)
+        os.execv(sys.executable, [sys.executable, *sys.argv])
+
+    threading.Thread(target=restart, daemon=True).start()
+
+
+class CZoneOutputMappingDecoder:
+    """Extract output-device circuit mappings from a decoded CZone .zcf file."""
+
+    def __init__(self, zcf_file: str | Path):
+        self.path = Path(zcf_file)
+        self.data = self.path.read_bytes()
+        self._modules: list[dict[str, Any]] | None = None
+        self._circuits: list[dict[str, Any]] | None = None
+
+    def header(self) -> dict[str, Any]:
+        d = self.data
+        if len(d) < 16:
+            raise ValueError("File too short to be a decoded ZCF sample")
+        name_len = d[14]
+        name_start = 15
+        system_name = d[name_start:name_start + name_len].decode("ascii", errors="replace")
+        return {
+            "file": str(self.path),
+            "size_bytes": len(d),
+            "version_byte": d[0],
+            "declared_payload_length": u32le(d, 1),
+            "system_name": system_name,
+            "module_table_offset": name_start + name_len,
+        }
+
+    def modules(self) -> list[dict[str, Any]]:
+        if self._modules is not None:
+            return self._modules
+        d = self.data
+        start = self.header()["module_table_offset"]
+        modules: list[dict[str, Any]] = []
+        if start + 6 > len(d):
+            self._modules = modules
+            return modules
+        block_len = u32le(d, start)
+        count = u16le(d, start + 4)
+        p = start + 6
+        end = min(start + 4 + block_len, len(d))
+        for ordinal in range(count):
+            if p + 5 > end:
+                break
+            first = d[p]
+            module_byte = d[p + 1]
+            type_id = u16le(d, p + 2)
+            name_len = d[p + 4] & 0x7F
+            name_start = p + 5
+            name_end = name_start + name_len
+            if name_end > end:
+                break
+            name = d[name_start:name_end].decode("ascii", errors="replace")
+            modules.append({
+                "ordinal": ordinal,
+                "name": name,
+                "kind": module_kind(name, type_id),
+                "module_byte": module_byte,
+                "module_byte_hex": f"0x{module_byte:02x}",
+                "czone_id": czone_id_from_dip_switch(module_byte),
+                "type_id": type_id,
+                "type_id_hex": f"0x{type_id:04x}",
+                "record_first_byte": first,
+                "offset": p,
+            })
+            p = name_end
+        self._modules = modules
+        return modules
+
+    def module_by_byte(self) -> dict[int, dict[str, Any]]:
+        return {m["module_byte"]: m for m in self.modules()}
+
+    def _control_record_size(self, control_payload: bytes) -> int | None:
+        if len(control_payload) < 2:
+            return None
+        count = u16le(control_payload, 0)
+        if count == 0:
+            return 0 if len(control_payload) == 2 else None
+        for size in (7, 8):
+            if 2 + size * count == len(control_payload):
+                return size
+        return None
+
+    def _parse_load_records(self, payload: bytes) -> list[dict[str, Any]]:
+        if len(payload) < 2:
+            return []
+        count = u16le(payload, 0)
+        records_data = payload[2:]
+        module_bytes = {m["module_byte"] for m in self.modules()}
+        if len(records_data) == count * 5:
+            plan = [5] * count
+        elif len(records_data) == count * 14:
+            plan = [14] * count
+        else:
+            memo: dict[tuple[int, int], list[int] | None] = {}
+
+            def rec(pos: int, remaining: int) -> list[int] | None:
+                if remaining == 0:
+                    return [] if pos == len(records_data) else None
+                key = (pos, remaining)
+                if key in memo:
+                    return memo[key]
+                best = None
+                best_score = -10**9
+                for size in (5, 14):
+                    if pos + size > len(records_data):
+                        continue
+                    module_byte = records_data[pos + 1]
+                    if module_byte not in module_bytes:
+                        continue
+                    tail = rec(pos + size, remaining - 1)
+                    if tail is None:
+                        continue
+                    score = 100 - records_data[pos]
+                    if size == 14 and any(records_data[pos + 5:pos + 14]):
+                        score += 5
+                    if score > best_score:
+                        best_score = score
+                        best = [size] + tail
+                memo[key] = best
+                return best
+
+            plan = rec(0, count) or []
+
+        out: list[dict[str, Any]] = []
+        p = 0
+        mods = self.module_by_byte()
+        for size in plan:
+            if p + size > len(records_data) or size < 5:
+                break
+            raw = records_data[p:p + size]
+            channel_index = raw[0]
+            module_byte = raw[1]
+            mod = mods.get(module_byte)
+            out.append({
+                "module_byte": module_byte,
+                "module_byte_hex": f"0x{module_byte:02x}",
+                "czone_id": czone_id_from_dip_switch(module_byte),
+                "output_module": mod["name"] if mod else f"unknown 0x{module_byte:02x}",
+                "output_module_type": mod["type_id_hex"] if mod else None,
+                "channel_index": channel_index,
+                "output_number": channel_index + 1,
+                "output_label": output_label(channel_index),
+                "value": u16le(raw, 2),
+                "flag": raw[4],
+                "raw_record_hex": raw.hex(" "),
+            })
+            p += size
+        return out
+
+    def circuits(self) -> list[dict[str, Any]]:
+        if self._circuits is not None:
+            return self._circuits
+        d = self.data
+        circuits: list[dict[str, Any]] = []
+        for name_start in range(8, len(d) - 12):
+            name_len = d[name_start - 1]
+            if not (2 <= name_len <= 100):
+                continue
+            header = d[name_start - 8:name_start - 1]
+            if len(header) != 7:
+                continue
+            circuit_id = header[0]
+            if not (0x01 <= circuit_id <= 0xEF):
+                continue
+            name_bytes = d[name_start:name_start + name_len]
+            if len(name_bytes) != name_len or not is_printable_ascii(name_bytes):
+                continue
+            pos = name_start + name_len
+            if pos + 4 > len(d):
+                continue
+            control_len = u32le(d, pos)
+            if not (2 <= control_len <= 4096):
+                continue
+            control_start = pos + 4
+            control_end = control_start + control_len
+            if control_end + 4 > len(d):
+                continue
+            control_size = self._control_record_size(d[control_start:control_end])
+            if control_size is None:
+                continue
+            load_len = u32le(d, control_end)
+            if not (2 <= load_len <= 4096):
+                continue
+            load_start = control_end + 4
+            load_end = load_start + load_len
+            if load_end > len(d):
+                continue
+            load_payload = d[load_start:load_end]
+            if len(load_payload) < 2:
+                continue
+            load_count = u16le(load_payload, 0)
+            if len(load_payload) < 2 + 5 * load_count:
+                continue
+            circuits.append({
+                "name": name_bytes.decode("ascii", errors="replace"),
+                "offset": name_start,
+                "circuit_id": circuit_id,
+                "circuit_id_hex": f"0x{circuit_id:02x}",
+                "loads": self._parse_load_records(load_payload),
+                "end_offset": load_end,
+            })
+        unique: list[dict[str, Any]] = []
+        seen = set()
+        for circuit in circuits:
+            if circuit["offset"] in seen:
+                continue
+            seen.add(circuit["offset"])
+            unique.append(circuit)
+        self._circuits = unique
+        return unique
+
+    def circuit_load_map_for_czone_id(self, czone_id: str) -> dict[int, tuple[int, ...]]:
+        mappings: dict[int, set[int]] = {}
+        for circuit in self.circuits():
+            for load in circuit["loads"]:
+                if load["czone_id"] == czone_id:
+                    mappings.setdefault(circuit["circuit_id"], set()).add(load["output_number"])
+        return {
+            circuit_id: tuple(sorted(outputs))
+            for circuit_id, outputs in sorted(mappings.items())
+        }
+
+
+def load_circuit_load_maps_from_config(
+    config_path: str | os.PathLike[str] = CONFIG_FILENAME,
+    czone_dip_switch: int = CZONE_DIP_SWITCH_DEFAULT,
+    default_maps: dict[int, int | tuple[int, ...] | list[int] | set[int]] | None = None,
+) -> tuple[dict[int, int | tuple[int, ...]], dict[str, Any]]:
+    defaults = dict(CIRCUIT_LOAD_MAPS if default_maps is None else default_maps)
+    path = Path(config_path)
+    czone_id = czone_id_from_dip_switch(czone_dip_switch)
+    file_info = zcf_config_file_info(path)
+    if not path.exists():
+        return defaults, {
+            "source": "default",
+            "status": "missing",
+            "message": f"{CONFIG_FILENAME} was not found; using built-in default circuit load mappings.",
+            "path": str(path),
+            "czone_id": czone_id,
+            "config_file": file_info,
+        }
+    try:
+        decoded = CZoneOutputMappingDecoder(path).circuit_load_map_for_czone_id(czone_id)
+    except Exception as exc:
+        return defaults, {
+            "source": "default",
+            "status": "error",
+            "message": f"Could not decode {CONFIG_FILENAME}: {exc}; using built-in default circuit load mappings.",
+            "path": str(path),
+            "czone_id": czone_id,
+            "config_file": file_info,
+        }
+    if not decoded:
+        return defaults, {
+            "source": "default",
+            "status": "no_match",
+            "message": f"No mappings for CZone ID {czone_id} in {CONFIG_FILENAME}; using built-in default circuit load mappings.",
+            "path": str(path),
+            "czone_id": czone_id,
+            "config_file": file_info,
+        }
+    return decoded, {
+        "source": "configuration.zcf",
+        "status": "loaded",
+        "message": f"Loaded circuit load mappings for CZone ID {czone_id} from {CONFIG_FILENAME}.",
+        "path": str(path),
+        "czone_id": czone_id,
+        "config_file": file_info,
+    }
 
 # ---------------- CAN TRANSPORT ----------------
 
@@ -287,6 +656,7 @@ class CZone:
     heartbeat_value: int = CZONE_HEARTBEAT_VALUE_DEFAULT
     pending_commands: dict[int, int] | None = None
     circuit_load_maps: dict[int, int | tuple[int, ...] | list[int] | set[int]] | None = None
+    mapping_config_status: dict[str, Any] | None = None
 
     def __post_init__(self):
         self.czone_dip_switch = self._normalize_byte(self.czone_dip_switch)
@@ -301,6 +671,14 @@ class CZone:
         if self.circuit_load_maps is None:
             self.circuit_load_maps = dict(CIRCUIT_LOAD_MAPS)
         self.circuit_load_maps = self._normalize_circuit_load_maps(self.circuit_load_maps)
+        if self.mapping_config_status is None:
+            self.mapping_config_status = {
+                "source": "default",
+                "status": "not_loaded",
+                "message": "Using built-in default circuit load mappings.",
+                "czone_id": czone_id_from_dip_switch(self.czone_dip_switch),
+                "config_file": zcf_config_file_info(),
+            }
         # Default currents are 0.0 A for all outputs at startup.
         # Outputs 5-6 remain reserved and fixed at 0.0 A.
         self.output_current_tenths = {idx: 0 for idx in range(1, OUTPUT_COUNT + 1)}
@@ -691,11 +1069,19 @@ class AppLogger:
 
 
 class CZoneWebServer:
-    def __init__(self, czone: CZone, logger: AppLogger, host: str = '0.0.0.0', port: int = 8080):
+    def __init__(
+        self,
+        czone: CZone,
+        logger: AppLogger,
+        host: str = '0.0.0.0',
+        port: int = 8080,
+        restart_callback: Callable[[], None] = schedule_program_restart,
+    ):
         self.czone = czone
         self.logger = logger
         self.host = host
         self.port = port
+        self.restart_callback = restart_callback
         self.app = Flask(__name__)
         self._setup_routes()
 
@@ -720,12 +1106,12 @@ s.switch_states.forEach((_,i)=>{const id=i+1;const btn=document.createElement('b
 const c=document.getElementById('currents');
 Object.entries(s.output_currents).forEach(([k,val])=>{const row=document.createElement('div');row.style.margin='5px 0';row.innerHTML=`<label>Output ${k}</label><input step='0.1' min='0' max='25.5' type='number' id='out_${k}' value='${Number(val).toFixed(1)}'><button id='apply_${k}'>Apply</button>`;row.querySelector('button').onclick=()=>{const amps=parseFloat(document.getElementById(`out_${k}`).value||'0');fetch('/api/output_current',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({output_index:Number(k),amps:amps})}).then(refresh)};c.appendChild(row);});
 const form=document.getElementById('config_form');
-form.onsubmit=async (event)=>{event.preventDefault();const status=document.getElementById('config_status');const input=document.getElementById('config_file');if(!input.files.length){status.textContent='Choose a .zcf file first.';return;}const data=new FormData();data.append('config_file',input.files[0]);const response=await fetch('/api/config/upload',{method:'POST',body:data});const result=await response.json();status.textContent=response.ok?`Saved ${result.filename} to ${result.path}`:(result.error||'Upload failed');if(response.ok){input.value='';refresh();}};
+form.onsubmit=async (event)=>{event.preventDefault();const status=document.getElementById('config_status');const input=document.getElementById('config_file');if(!input.files.length){status.textContent='Choose a .zcf file first.';return;}const data=new FormData();data.append('config_file',input.files[0]);const response=await fetch('/api/config/upload',{method:'POST',body:data});const result=await response.json();status.textContent=response.ok?`Saved ${result.filename} (${result.config_file?.internal_name||'unknown name'}, ${result.config_file?.size_label||'unknown size'}). Restarting emulator to ingest configuration...`:(result.error||'Upload failed');if(response.ok){input.value='';refresh();}};
 uiInit=true;
 }
 async function refresh(){const s=await (await fetch('/api/state')).json();const l=await (await fetch('/api/logs')).json();ensureUi(s);
 const st=s.switch_states.map((v,i)=>`S${i+1}: ${v?'ON':'OFF'}`).join(' | ');document.getElementById('states').innerText=`DIP: ${s.czone_dip_switch}   ${st}`;
-const mapLines=Object.entries(s.mappings).map(([circuit,loads])=>`${circuit}: `+loads.join(', '));document.getElementById('mapping').innerText='Circuit load mappings:\\n'+mapLines.join('\\n');
+const mapLines=Object.entries(s.mappings).map(([circuit,loads])=>`${circuit}: `+loads.join(', '));const cfg=s.mapping_config_status||{};const file=cfg.config_file||{};const fileText=file.exists?`\\nConfiguration file: ${file.filename||file.configured_filename} | Internal name: ${file.internal_name||file.metadata_error||'unknown'} | Size: ${file.size_label||file.size_bytes||'unknown'}`:'\\nConfiguration file: not found';document.getElementById('mapping').innerText=`Mapping source: ${cfg.message||'Unknown'}${fileText}\\nCircuit load mappings:\\n`+mapLines.join('\\n');
 s.switch_states.forEach((v,i)=>{const id=i+1;const btn=document.getElementById(`sw_${id}`);btn.className=v?'on':'off';btn.textContent=`Toggle S${id} (${v?'ON':'OFF'})`;});
 Object.entries(s.output_currents).forEach(([k,val])=>{const input=document.getElementById(`out_${k}`);if(document.activeElement!==input){input.value=Number(val).toFixed(1);}});
 document.getElementById('logs').textContent=(l.logs||[]).slice(-50).join('\\n');}
@@ -746,6 +1132,7 @@ setInterval(refresh,1000);refresh();
                     f"0x{circuit_code:02X}": list(load_indexes)
                     for circuit_code, load_indexes in sorted(self.czone.circuit_load_maps.items())
                 },
+                'mapping_config_status': self.czone.mapping_config_status,
             })
 
         @self.app.post('/api/toggle')
@@ -785,8 +1172,18 @@ setInterval(refresh,1000);refresh();
                 saved_path = save_zcf_config_file(uploaded_file)
             except ValueError as exc:
                 return jsonify({'error': str(exc)}), 400
+            _, status = load_circuit_load_maps_from_config(saved_path, self.czone.czone_dip_switch)
+            self.czone.mapping_config_status = status
             self.logger.log(f"Web configuration file loaded: {saved_path.name} saved to {saved_path}")
-            return jsonify({'filename': saved_path.name, 'path': str(saved_path)})
+            self.logger.log("Restarting emulator to ingest uploaded configuration.zcf")
+            self.restart_callback()
+            return jsonify({
+                'filename': saved_path.name,
+                'path': str(saved_path),
+                'mapping_config_status': status,
+                'config_file': status.get('config_file', zcf_config_file_info(saved_path)),
+                'restart_scheduled': True,
+            })
 
         @self.app.get('/api/logs')
         def logs():
@@ -962,7 +1359,9 @@ def main():
 
     try:
         logger = AppLogger()
-        czone = CZone(transport, logger=logger)
+        circuit_load_maps, mapping_status = load_circuit_load_maps_from_config()
+        czone = CZone(transport, logger=logger, circuit_load_maps=circuit_load_maps, mapping_config_status=mapping_status)
+        logger.log(mapping_status['message'])
         web_host = os.getenv("WEB_HOST", "0.0.0.0")
         web_port = int(os.getenv("WEB_PORT", "8080"))
         web_server = CZoneWebServer(czone, logger=logger, host=web_host, port=web_port)
