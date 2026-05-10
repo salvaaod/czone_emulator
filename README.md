@@ -101,8 +101,10 @@ Incoming PGN 65280 commands are matched by CZone circuit code, not by keyboard C
 CIRCUIT_LOAD_MAPS = {
     0x05: 1,
     0x06: 2,
-    0x07: 3,
-    0x08: 4,
+    0x07: 1,
+    0x08: 2,
+    0x09: 3,
+    0x0A: 4,
 }
 ```
 
@@ -117,7 +119,7 @@ CIRCUIT_LOAD_MAPS = {
 
 ### Network feedback mapping
 
-Feedback sent by the emulator is keyed to the same local output/load number selected by `CIRCUIT_LOAD_MAPS`. Output ON/OFF feedback uses switch codes `0x05` through `0x08` for outputs 1 through 4, and detailed PGN 130817 feedback writes each output's current byte into that output's own 3-byte network record. For example, output 3 feedback is sent as output 3, not output 1.
+Feedback sent by the emulator is keyed to the same local output/load number selected by `CIRCUIT_LOAD_MAPS`. Output ON/OFF feedback keeps the original switch status encoding: switch codes `0x05` through `0x08` represent outputs 1 through 4. Detailed PGN 130817 current feedback also keeps the original byte layout; circuit mapping only decides which local output changes, not how switch status or current feedback is encoded.
 
 ### Web settings
 

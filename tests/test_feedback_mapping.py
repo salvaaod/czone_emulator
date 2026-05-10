@@ -51,8 +51,8 @@ class FeedbackMappingTest(unittest.TestCase):
                 combined_payload.extend(frame[1:])
         return combined_payload
 
-    def test_circuit_codes_map_to_same_numbered_switch_status_bits(self):
-        for circuit_code, switch_number in ((0x05, 1), (0x06, 2), (0x07, 3), (0x08, 4)):
+    def test_default_circuit_codes_map_to_configured_switch_status_bits(self):
+        for circuit_code, switch_number in ((0x05, 1), (0x06, 2), (0x07, 1), (0x08, 2), (0x09, 3), (0x0A, 4)):
             with self.subTest(circuit_code=circuit_code, switch_number=switch_number):
                 self.czone.state = 0
                 self.transport.sent.clear()
@@ -79,19 +79,20 @@ class FeedbackMappingTest(unittest.TestCase):
                     [idx == switch_number for idx in range(1, 5)],
                 )
 
-    def test_current_feedback_uses_same_numbered_pgn_output_records(self):
+    def test_current_feedback_keeps_original_pgn_byte_positions(self):
         for output_index, amps in ((1, 1.1), (2, 2.2), (3, 3.3), (4, 4.4)):
             self.czone.set_output_current(output_index, amps)
 
         self.transport.sent.clear()
         self.czone.detailed_status()
         payload = self.latest_detailed_status_payload()
-        output_records = payload[4:]
+        output_bytes = payload[4:]
 
-        self.assertEqual(output_records[0], 11)
-        self.assertEqual(output_records[3], 22)
-        self.assertEqual(output_records[6], 33)
-        self.assertEqual(output_records[9], 44)
+        self.assertEqual(len(payload), 28)
+        self.assertEqual(output_bytes[0], 11)
+        self.assertEqual(output_bytes[3], 22)
+        self.assertEqual(output_bytes[6], 33)
+        self.assertEqual(output_bytes[9], 44)
 
 
 if __name__ == "__main__":
