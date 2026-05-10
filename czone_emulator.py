@@ -63,6 +63,20 @@ CIRCUIT_LOAD_MAPS = {
     0x07: 3,
     0x08: 4,
 }
+NETWORK_OUTPUT_SWITCH_CODES = {
+    1: 0x05,
+    2: 0x06,
+    3: 0x07,
+    4: 0x08,
+}
+NETWORK_OUTPUT_CURRENT_BYTE_POSITIONS = {
+    1: 0,
+    2: 3,
+    3: 6,
+    4: 9,
+    5: 12,
+    6: 15,
+}
 
 # ---------------- CAN TRANSPORT ----------------
 
@@ -375,15 +389,14 @@ class CZone:
         self.send(PGN_65284, data)
 
     def detailed_status(self):
-        # Legacy PGN 130817 layout: header + six 4-byte output blocks = 28 bytes.
-        # Current mapping discovered from bench testing:
-        # O1 -> block1 b0, O2 -> block1 b3, O3 -> block2 b2, O4 -> block3 b1,
-        # then +3 byte stride for outputs 5 and 6.
+        # Legacy PGN 130817 layout: header + six 3-byte network output records.
+        # The first byte of each 3-byte record is the feedback/current byte for
+        # that same network output number, so output 3 is sent in output 3's
+        # record and output 4 is sent in output 4's record.
         payload = bytearray(u16(CZONE_MESSAGE) + bytes([0x00, self.czone_dip_switch]))
-        output_bytes = bytearray([0x00, 0x00, 0x04, 0x00] * OUTPUT_COUNT)
+        output_bytes = bytearray([0x00, 0x00, 0x04] * OUTPUT_COUNT)
 
-        current_byte_positions = {1: 0, 2: 3, 3: 6, 4: 9, 5: 12, 6: 15}
-        for output_index, position in current_byte_positions.items():
+        for output_index, position in NETWORK_OUTPUT_CURRENT_BYTE_POSITIONS.items():
             current_byte = self.get_output_current_tenths(output_index)
             if output_index > ADJUSTABLE_OUTPUT_COUNT:
                 current_byte = 0
@@ -414,16 +427,27 @@ class CZone:
         self.send_fast_packet(PGN_126996, payload, priority=6)
         self._log("TX 126996 product information")
 
+    @staticmethod
+    def _switch_code_for_output(output_index: int) -> int | None:
+        return NETWORK_OUTPUT_SWITCH_CODES.get(output_index)
+
+    @staticmethod
+    def _state_mask_for_output(output_index: int) -> int:
+        return 1 << (output_index - 1)
+
     def _set_switch(self, switch_code: int, is_on: bool) -> bool:
-        if not (0x05 <= switch_code <= 0x08):
+        if switch_code not in NETWORK_OUTPUT_SWITCH_CODES.values():
             return False
-        bit = switch_code - 0x05
+        bit = switch_code - min(NETWORK_OUTPUT_SWITCH_CODES.values())
         mask = 1 << bit
         self.state = (self.state | mask) if is_on else (self.state & ~mask)
         return bool(self.state & mask)
 
     def _set_output(self, output_index: int, is_on: bool) -> bool:
-        return self._set_switch(0x04 + output_index, is_on)
+        switch_code = self._switch_code_for_output(output_index)
+        if switch_code is None:
+            return False
+        return self._set_switch(switch_code, is_on)
 
     @staticmethod
     def _normalize_circuit_load_maps(
@@ -487,12 +511,14 @@ class CZone:
                 self.pending_commands.pop(circuit_code, None)
             else:
                 for output_index in load_indexes:
-                    is_on = bool(self.state & (1 << (output_index - 1)))
+                    is_on = bool(self.state & self._state_mask_for_output(output_index))
                     updated_states.append((output_index, is_on))
 
             if self.on_switch_event:
                 for output_index, is_on in updated_states:
-                    self.on_switch_event(0x04 + output_index, is_on)
+                    switch_code = self._switch_code_for_output(output_index)
+                    if switch_code is not None:
+                        self.on_switch_event(switch_code, is_on)
 
             states_text = ", ".join(
                 f"Output {output_index}={'ON' if is_on else 'OFF'}"
@@ -717,10 +743,12 @@ setInterval(refresh,1000);refresh();
             if not (1 <= switch_id <= 4):
                 return jsonify({'error': 'switch_id must be 1..4'}), 400
             current = self.czone.get_switch_states()[switch_id - 1]
-            updated = self.czone._set_switch(0x04 + switch_id, not current)
+            updated = self.czone._set_output(switch_id, not current)
             self.logger.log(f"Web switch {switch_id} -> {'ON' if updated else 'OFF'}")
             if self.czone.on_switch_event:
-                self.czone.on_switch_event(0x04 + switch_id, updated)
+                switch_code = self.czone._switch_code_for_output(switch_id)
+                if switch_code is not None:
+                    self.czone.on_switch_event(switch_code, updated)
             self.czone.heartbeat()
             self.czone.detailed_status()
             return jsonify({'switch_id': switch_id, 'is_on': updated})
@@ -820,8 +848,8 @@ class CZoneHeadless:
                 else:
                     continue
 
-            before = bool(self.czone.state & (1 << (switch_id - 1)))
-            after = self.czone._set_switch(0x04 + switch_id, is_on)
+            before = bool(self.czone.state & self.czone._state_mask_for_output(switch_id))
+            after = self.czone._set_output(switch_id, is_on)
             if after != before:
                 source_state = {1: "OPEN", 2: "CLOSED", 3: "TRIPPED/LOCKED"}.get(value, f"RAW={value}")
                 self.logger.log(f"Modbus breaker {switch_id} status -> {source_state}")
@@ -841,8 +869,8 @@ class CZoneHeadless:
             else:
                 final_state = True if last_polled is True else False
 
-            before = bool(self.czone.state & (1 << (switch_id - 1)))
-            after = self.czone._set_switch(0x04 + switch_id, final_state)
+            before = bool(self.czone.state & self.czone._state_mask_for_output(switch_id))
+            after = self.czone._set_output(switch_id, final_state)
             if after != before:
                 self.logger.log(f"Modbus timeout on breaker {switch_id}; final virtual state {'ON' if after else 'OFF'}")
                 self.czone.heartbeat()

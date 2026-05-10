@@ -108,6 +108,10 @@ CIRCUIT_LOAD_MAPS = {
 
 A future configuration file can replace this table without changing the command-processing logic.
 
+### Network feedback mapping
+
+Feedback sent by the emulator is keyed to the same local output/load number selected by `CIRCUIT_LOAD_MAPS`. Output ON/OFF feedback uses switch codes `0x05` through `0x08` for outputs 1 through 4, and detailed PGN 130817 feedback writes each output's current byte into that output's own 3-byte network record. For example, output 3 feedback is sent as output 3, not output 1.
+
 ### Web settings
 
 - `WEB_HOST`: Flask bind host. Default: `0.0.0.0`.
