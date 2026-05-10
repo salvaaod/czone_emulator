@@ -13,6 +13,7 @@ At runtime, the emulator:
 - Opens a Modbus RTU serial connection to poll and command breaker devices.
 - Publishes NMEA 2000 identity, heartbeat, and detailed CZone status frames.
 - Maintains virtual switch states and adjustable output-current values.
+- Reacts to configured CZone circuit codes from any network device and maps each circuit to one or more local loads.
 - Exposes a small Flask web UI plus JSON endpoints for monitoring and control.
 
 ## Requirements
@@ -92,6 +93,32 @@ http://<host>:8080/
 - `SERIAL_LINUX_DEFAULT_PORT`: Compatibility fallback used when `SERIAL_PORT=COM8`. Default: `/dev/ttyAS3`.
 - `SERIAL_COM_ALIAS_MAP`: Optional comma-separated compatibility alias map, for example `COM8=/dev/ttyAS3,COM9=/dev/ttyUSB0`.
 
+### Circuit/load mappings
+
+Incoming PGN 65280 commands are matched by CZone circuit code, not by keyboard CZone ID or key scan. The default in-code `CIRCUIT_LOAD_MAPS` table maps circuits to local loads and accepts either a single load integer or an iterable of load integers:
+
+```python
+CIRCUIT_LOAD_MAPS = {
+    0x07: 1,
+    0x08: 2,
+    0x09: 3,
+    0x0A: 4,
+}
+```
+
+A future configuration file can replace this table without changing the command-processing logic. Circuit codes do not need to match the switch/output number. For example, this is valid and still sends switch/output feedback as outputs 1 and 2:
+
+```python
+CIRCUIT_LOAD_MAPS = {
+    0x10: 1,
+    0x11: 2,
+}
+```
+
+### Network feedback mapping
+
+Feedback sent by the emulator is keyed to the same local output/load number selected by `CIRCUIT_LOAD_MAPS`; the circuit code itself is not written into the feedback payload. Output ON/OFF feedback keeps the original switch status encoding: switch codes `0x05` through `0x08` represent outputs 1 through 4. Detailed PGN 130817 current feedback also keeps the original byte layout; circuit mapping only decides which local output changes, not how switch status or current feedback is encoded.
+
 ### Web settings
 
 - `WEB_HOST`: Flask bind host. Default: `0.0.0.0`.
@@ -105,7 +132,7 @@ Returns the lightweight monitoring/control web page.
 
 ### `GET /api/state`
 
-Returns switch states, DIP switch value, adjustable output currents, and keyboard mappings.
+Returns switch states, DIP switch value, adjustable output currents, and circuit-to-load mappings.
 
 ### `POST /api/toggle`
 
