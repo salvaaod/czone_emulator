@@ -59,9 +59,9 @@ MODBUS_ACTION_TIMEOUT_SECONDS = 5.0
 MODBUS_INTER_FRAME_GAP_SECONDS = 0.005
 CIRCUIT_LOAD_MAPS = {
     0x07: 1,
-    0x08: 2,
-    0x09: 3,
-    0x0A: 4,
+    0x08: 3,
+#   0x09: 3,
+#   0x0A: 4,
 }
 
 # ---------------- CAN TRANSPORT ----------------
