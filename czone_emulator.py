@@ -484,13 +484,15 @@ class CZone:
                 for output_index in load_indexes:
                     is_on = self._set_output(output_index, desired)
                     updated_states.append((output_index, is_on))
-                    if self.on_switch_event:
-                        self.on_switch_event(0x04 + output_index, is_on)
                 self.pending_commands.pop(circuit_code, None)
             else:
                 for output_index in load_indexes:
                     is_on = bool(self.state & (1 << (output_index - 1)))
                     updated_states.append((output_index, is_on))
+
+            if self.on_switch_event:
+                for output_index, is_on in updated_states:
+                    self.on_switch_event(0x04 + output_index, is_on)
 
             states_text = ", ".join(
                 f"Output {output_index}={'ON' if is_on else 'OFF'}"
