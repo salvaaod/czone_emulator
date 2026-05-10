@@ -193,11 +193,7 @@ def extract_zcf_internal_name_checked(path: str | os.PathLike[str]) -> str:
 
 
 def format_file_size(size_bytes: int) -> str:
-    if size_bytes < 1024:
-        return f"{size_bytes} B"
-    if size_bytes < 1024 * 1024:
-        return f"{size_bytes / 1024:.1f} KiB"
-    return f"{size_bytes / (1024 * 1024):.1f} MiB"
+    return f"{size_bytes} bytes"
 
 
 def zcf_config_file_info(path: str | os.PathLike[str] = CONFIG_FILENAME) -> dict[str, Any]:
