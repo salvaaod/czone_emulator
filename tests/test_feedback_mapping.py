@@ -22,7 +22,9 @@ from czone_emulator import (
     PGN_65284,
     SRC,
     czone_id_from_dip_switch,
+    extract_zcf_internal_name_checked,
     load_circuit_load_maps_from_config,
+    zcf_config_file_info,
     n2k_id,
     parse_pgn,
     sanitize_config_filename,
@@ -32,7 +34,7 @@ from czone_emulator import (
 
 def build_test_zcf(module_byte=2):
     system_name = b"Test"
-    header = bytearray(b"\x01" + (0).to_bytes(4, "little") + (b"\x00" * 9) + bytes([len(system_name)]) + system_name)
+    header = bytearray(b"\x06" + (0).to_bytes(4, "little") + (b"\x00" * 9) + bytes([len(system_name)]) + system_name)
     module_records = (
         bytes([0, module_byte]) + (0xFD0F).to_bytes(2, "little") + bytes([2]) + b"OI"
         + bytes([0, 0x01]) + (0x001D).to_bytes(2, "little") + bytes([2]) + b"KP"
@@ -57,6 +59,7 @@ def build_test_zcf(module_byte=2):
 
     header.extend(circuit(0x21, "Cabin", [1]))
     header.extend(circuit(0x22, "Galley", [2, 3]))
+    header[1:5] = (len(header) - 7).to_bytes(4, "little")
     return bytes(header)
 
 
@@ -97,6 +100,20 @@ class ConfigMappingLoadTest(unittest.TestCase):
             self.assertEqual(maps, {0x07: 1, 0x08: 2, 0x09: 3, 0x0A: 4})
             self.assertEqual(status["source"], "default")
             self.assertIn("not found", status["message"])
+
+
+    def test_configuration_file_info_decodes_internal_name_and_size(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            config_path = Path(tmpdir) / "configuration.zcf"
+            config_path.write_bytes(build_test_zcf())
+
+            info = zcf_config_file_info(config_path)
+
+            self.assertTrue(info["recognized"])
+            self.assertEqual(info["filename"], "configuration.zcf")
+            self.assertEqual(info["internal_name"], "Test")
+            self.assertEqual(info["size_bytes"], config_path.stat().st_size)
+            self.assertEqual(extract_zcf_internal_name_checked(config_path), "Test")
 
     def test_configuration_file_maps_matching_czone_id_circuits_to_outputs(self):
         with tempfile.TemporaryDirectory() as tmpdir:

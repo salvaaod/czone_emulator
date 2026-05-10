@@ -106,7 +106,7 @@ CIRCUIT_LOAD_MAPS = {
 }
 ```
 
-At startup, the emulator looks for `configuration.zcf` in the current working directory. When the file exists, it decodes the output-device mappings for the CZone ID represented by `CZONE_DIP_SWITCH_DEFAULT` (the stored DIP byte with its bits reversed, so the default `2` is CZone ID `01000000`) and replaces `CIRCUIT_LOAD_MAPS` with the Circuit ID -> output number relationships from the file. If `configuration.zcf` is missing, cannot be decoded, or does not contain mappings for that CZone ID, the emulator keeps the built-in table above and reports the fallback in the Web UI mapping card. Circuit codes do not need to match the switch/output number. For example, this is valid and still sends switch/output feedback as outputs 1 and 2:
+At startup, the emulator looks for `configuration.zcf` in the current working directory. When the file exists, it decodes the output-device mappings for the CZone ID represented by `CZONE_DIP_SWITCH_DEFAULT` (the stored DIP byte with its bits reversed, so the default `2` is CZone ID `01000000`) and replaces `CIRCUIT_LOAD_MAPS` with the Circuit ID -> output number relationships from the file. The Web UI shows the active mapping status plus the configuration file's stored filename, decoded internal ZCF name, and size. If `configuration.zcf` is missing, cannot be decoded, or does not contain mappings for that CZone ID, the emulator keeps the built-in table above and reports the fallback in the Web UI mapping card. Circuit codes do not need to match the switch/output number. For example, this is valid and still sends switch/output feedback as outputs 1 and 2:
 
 ```python
 CIRCUIT_LOAD_MAPS = {
@@ -160,7 +160,7 @@ Valid `output_index` values are `1` through `4`.
 
 ### `POST /api/config/upload`
 
-Uploads a CZone configuration file from the web UI and saves it as `configuration.zcf` in the current working directory of the running process. Only files with the `.zcf` extension are accepted. After a successful upload, the emulator immediately reloads the Circuit ID -> output mapping for the configured CZone ID and shows whether the uploaded file or the built-in default mapping is active.
+Uploads a CZone configuration file from the web UI and saves it as `configuration.zcf` in the current working directory of the running process. Only files with the `.zcf` extension are accepted. After a successful upload, the emulator reports the decoded internal ZCF name and file size, then restarts the process so startup ingests the new Circuit ID -> output mapping for the configured CZone ID.
 
 Request body: multipart form data with a `config_file` file field.
 

@@ -3,6 +3,7 @@ import os
 import re
 import struct
 import subprocess
+import sys
 import threading
 import time
 from flask import Flask, jsonify, request
@@ -119,6 +120,74 @@ def save_zcf_config_file(uploaded_file, target_dir: str | os.PathLike[str] | Non
     destination_path = destination_dir / CONFIG_FILENAME
     uploaded_file.save(str(destination_path))
     return destination_path
+
+
+def extract_zcf_internal_name_checked(path: str | os.PathLike[str]) -> str:
+    data = Path(path).read_bytes()
+
+    if len(data) < 0x10:
+        raise ValueError("File too small")
+
+    if data[0] != 0x06:
+        raise ValueError("Not a recognized ZCF file")
+
+    declared_payload_len = struct.unpack_from("<I", data, 1)[0]
+    expected_payload_len = len(data) - 7
+
+    if declared_payload_len != expected_payload_len:
+        raise ValueError(
+            f"Length mismatch: declared {declared_payload_len}, expected {expected_payload_len}"
+        )
+
+    name_len = data[0x0E]
+    name_start = 0x0F
+    name_end = name_start + name_len
+
+    if name_end > len(data):
+        raise ValueError("Invalid internal name length")
+
+    return data[name_start:name_end].decode("utf-8", errors="replace")
+
+
+def format_file_size(size_bytes: int) -> str:
+    if size_bytes < 1024:
+        return f"{size_bytes} B"
+    if size_bytes < 1024 * 1024:
+        return f"{size_bytes / 1024:.1f} KiB"
+    return f"{size_bytes / (1024 * 1024):.1f} MiB"
+
+
+def zcf_config_file_info(path: str | os.PathLike[str] = CONFIG_FILENAME) -> dict[str, Any]:
+    config_path = Path(path)
+    info: dict[str, Any] = {
+        "configured_filename": CONFIG_FILENAME,
+        "path": str(config_path),
+        "exists": config_path.exists(),
+    }
+    if not config_path.exists():
+        return info
+
+    size_bytes = config_path.stat().st_size
+    info.update({
+        "filename": config_path.name,
+        "size_bytes": size_bytes,
+        "size_label": format_file_size(size_bytes),
+    })
+    try:
+        info["internal_name"] = extract_zcf_internal_name_checked(config_path)
+        info["recognized"] = True
+    except ValueError as exc:
+        info["recognized"] = False
+        info["metadata_error"] = str(exc)
+    return info
+
+
+def schedule_program_restart(delay_seconds: float = 0.5) -> None:
+    def restart() -> None:
+        time.sleep(delay_seconds)
+        os.execv(sys.executable, [sys.executable, *sys.argv])
+
+    threading.Thread(target=restart, daemon=True).start()
 
 
 class CZoneOutputMappingDecoder:
@@ -350,6 +419,7 @@ def load_circuit_load_maps_from_config(
     defaults = dict(CIRCUIT_LOAD_MAPS if default_maps is None else default_maps)
     path = Path(config_path)
     czone_id = czone_id_from_dip_switch(czone_dip_switch)
+    file_info = zcf_config_file_info(path)
     if not path.exists():
         return defaults, {
             "source": "default",
@@ -357,6 +427,7 @@ def load_circuit_load_maps_from_config(
             "message": f"{CONFIG_FILENAME} was not found; using built-in default circuit load mappings.",
             "path": str(path),
             "czone_id": czone_id,
+            "config_file": file_info,
         }
     try:
         decoded = CZoneOutputMappingDecoder(path).circuit_load_map_for_czone_id(czone_id)
@@ -367,6 +438,7 @@ def load_circuit_load_maps_from_config(
             "message": f"Could not decode {CONFIG_FILENAME}: {exc}; using built-in default circuit load mappings.",
             "path": str(path),
             "czone_id": czone_id,
+            "config_file": file_info,
         }
     if not decoded:
         return defaults, {
@@ -375,6 +447,7 @@ def load_circuit_load_maps_from_config(
             "message": f"No mappings for CZone ID {czone_id} in {CONFIG_FILENAME}; using built-in default circuit load mappings.",
             "path": str(path),
             "czone_id": czone_id,
+            "config_file": file_info,
         }
     return decoded, {
         "source": "configuration.zcf",
@@ -382,6 +455,7 @@ def load_circuit_load_maps_from_config(
         "message": f"Loaded circuit load mappings for CZone ID {czone_id} from {CONFIG_FILENAME}.",
         "path": str(path),
         "czone_id": czone_id,
+        "config_file": file_info,
     }
 
 # ---------------- CAN TRANSPORT ----------------
@@ -603,6 +677,7 @@ class CZone:
                 "status": "not_loaded",
                 "message": "Using built-in default circuit load mappings.",
                 "czone_id": czone_id_from_dip_switch(self.czone_dip_switch),
+                "config_file": zcf_config_file_info(),
             }
         # Default currents are 0.0 A for all outputs at startup.
         # Outputs 5-6 remain reserved and fixed at 0.0 A.
@@ -994,11 +1069,19 @@ class AppLogger:
 
 
 class CZoneWebServer:
-    def __init__(self, czone: CZone, logger: AppLogger, host: str = '0.0.0.0', port: int = 8080):
+    def __init__(
+        self,
+        czone: CZone,
+        logger: AppLogger,
+        host: str = '0.0.0.0',
+        port: int = 8080,
+        restart_callback: Callable[[], None] = schedule_program_restart,
+    ):
         self.czone = czone
         self.logger = logger
         self.host = host
         self.port = port
+        self.restart_callback = restart_callback
         self.app = Flask(__name__)
         self._setup_routes()
 
@@ -1023,12 +1106,12 @@ s.switch_states.forEach((_,i)=>{const id=i+1;const btn=document.createElement('b
 const c=document.getElementById('currents');
 Object.entries(s.output_currents).forEach(([k,val])=>{const row=document.createElement('div');row.style.margin='5px 0';row.innerHTML=`<label>Output ${k}</label><input step='0.1' min='0' max='25.5' type='number' id='out_${k}' value='${Number(val).toFixed(1)}'><button id='apply_${k}'>Apply</button>`;row.querySelector('button').onclick=()=>{const amps=parseFloat(document.getElementById(`out_${k}`).value||'0');fetch('/api/output_current',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({output_index:Number(k),amps:amps})}).then(refresh)};c.appendChild(row);});
 const form=document.getElementById('config_form');
-form.onsubmit=async (event)=>{event.preventDefault();const status=document.getElementById('config_status');const input=document.getElementById('config_file');if(!input.files.length){status.textContent='Choose a .zcf file first.';return;}const data=new FormData();data.append('config_file',input.files[0]);const response=await fetch('/api/config/upload',{method:'POST',body:data});const result=await response.json();status.textContent=response.ok?`Saved ${result.filename} to ${result.path}`:(result.error||'Upload failed');if(response.ok){input.value='';refresh();}};
+form.onsubmit=async (event)=>{event.preventDefault();const status=document.getElementById('config_status');const input=document.getElementById('config_file');if(!input.files.length){status.textContent='Choose a .zcf file first.';return;}const data=new FormData();data.append('config_file',input.files[0]);const response=await fetch('/api/config/upload',{method:'POST',body:data});const result=await response.json();status.textContent=response.ok?`Saved ${result.filename} (${result.config_file?.internal_name||'unknown name'}, ${result.config_file?.size_label||'unknown size'}). Restarting emulator to ingest configuration...`:(result.error||'Upload failed');if(response.ok){input.value='';refresh();}};
 uiInit=true;
 }
 async function refresh(){const s=await (await fetch('/api/state')).json();const l=await (await fetch('/api/logs')).json();ensureUi(s);
 const st=s.switch_states.map((v,i)=>`S${i+1}: ${v?'ON':'OFF'}`).join(' | ');document.getElementById('states').innerText=`DIP: ${s.czone_dip_switch}   ${st}`;
-const mapLines=Object.entries(s.mappings).map(([circuit,loads])=>`${circuit}: `+loads.join(', '));const cfg=s.mapping_config_status||{};document.getElementById('mapping').innerText=`Mapping source: ${cfg.message||'Unknown'}\\nCircuit load mappings:\\n`+mapLines.join('\\n');
+const mapLines=Object.entries(s.mappings).map(([circuit,loads])=>`${circuit}: `+loads.join(', '));const cfg=s.mapping_config_status||{};const file=cfg.config_file||{};const fileText=file.exists?`\\nConfiguration file: ${file.filename||file.configured_filename} | Internal name: ${file.internal_name||file.metadata_error||'unknown'} | Size: ${file.size_label||file.size_bytes||'unknown'}`:'\\nConfiguration file: not found';document.getElementById('mapping').innerText=`Mapping source: ${cfg.message||'Unknown'}${fileText}\\nCircuit load mappings:\\n`+mapLines.join('\\n');
 s.switch_states.forEach((v,i)=>{const id=i+1;const btn=document.getElementById(`sw_${id}`);btn.className=v?'on':'off';btn.textContent=`Toggle S${id} (${v?'ON':'OFF'})`;});
 Object.entries(s.output_currents).forEach(([k,val])=>{const input=document.getElementById(`out_${k}`);if(document.activeElement!==input){input.value=Number(val).toFixed(1);}});
 document.getElementById('logs').textContent=(l.logs||[]).slice(-50).join('\\n');}
@@ -1089,12 +1172,18 @@ setInterval(refresh,1000);refresh();
                 saved_path = save_zcf_config_file(uploaded_file)
             except ValueError as exc:
                 return jsonify({'error': str(exc)}), 400
-            maps, status = load_circuit_load_maps_from_config(saved_path, self.czone.czone_dip_switch)
-            self.czone.circuit_load_maps = self.czone._normalize_circuit_load_maps(maps)
+            _, status = load_circuit_load_maps_from_config(saved_path, self.czone.czone_dip_switch)
             self.czone.mapping_config_status = status
             self.logger.log(f"Web configuration file loaded: {saved_path.name} saved to {saved_path}")
-            self.logger.log(status['message'])
-            return jsonify({'filename': saved_path.name, 'path': str(saved_path), 'mapping_config_status': status})
+            self.logger.log("Restarting emulator to ingest uploaded configuration.zcf")
+            self.restart_callback()
+            return jsonify({
+                'filename': saved_path.name,
+                'path': str(saved_path),
+                'mapping_config_status': status,
+                'config_file': status.get('config_file', zcf_config_file_info(saved_path)),
+                'restart_scheduled': True,
+            })
 
         @self.app.get('/api/logs')
         def logs():
