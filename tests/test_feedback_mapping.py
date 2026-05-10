@@ -52,7 +52,7 @@ class FeedbackMappingTest(unittest.TestCase):
         return combined_payload
 
     def test_default_circuit_codes_map_to_configured_switch_status_bits(self):
-        for circuit_code, switch_number in ((0x05, 1), (0x06, 2), (0x07, 1), (0x08, 2), (0x09, 3), (0x0A, 4)):
+        for circuit_code, switch_number in ((0x07, 1), (0x08, 2), (0x09, 3), (0x0A, 4)):
             with self.subTest(circuit_code=circuit_code, switch_number=switch_number):
                 self.czone.state = 0
                 self.transport.sent.clear()
@@ -63,6 +63,16 @@ class FeedbackMappingTest(unittest.TestCase):
                     self.czone.get_switch_states(),
                     [idx == switch_number for idx in range(1, 5)],
                 )
+
+
+    def test_commit_without_staged_command_does_not_emit_switch_event(self):
+        events = []
+        self.czone.on_switch_event = lambda switch_code, is_on: events.append((switch_code, is_on))
+
+        self.send_circuit_command(0x07, 0x40)
+
+        self.assertEqual(events, [])
+        self.assertEqual(self.czone.get_switch_states(), [False, False, False, False])
 
     def test_arbitrary_circuit_codes_map_to_configured_switches(self):
         self.czone = CZone(self.transport, circuit_load_maps={0x10: 1, 0x11: 2})

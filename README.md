@@ -99,8 +99,6 @@ Incoming PGN 65280 commands are matched by CZone circuit code, not by keyboard C
 
 ```python
 CIRCUIT_LOAD_MAPS = {
-    0x05: 1,
-    0x06: 2,
     0x07: 1,
     0x08: 2,
     0x09: 3,
@@ -119,7 +117,7 @@ CIRCUIT_LOAD_MAPS = {
 
 ### Network feedback mapping
 
-Feedback sent by the emulator is keyed to the same local output/load number selected by `CIRCUIT_LOAD_MAPS`. Output ON/OFF feedback keeps the original switch status encoding: switch codes `0x05` through `0x08` represent outputs 1 through 4. Detailed PGN 130817 current feedback also keeps the original byte layout; circuit mapping only decides which local output changes, not how switch status or current feedback is encoded.
+Feedback sent by the emulator is keyed to the same local output/load number selected by `CIRCUIT_LOAD_MAPS`; the circuit code itself is not written into the feedback payload. Output ON/OFF feedback keeps the original switch status encoding: switch codes `0x05` through `0x08` represent outputs 1 through 4. Detailed PGN 130817 current feedback also keeps the original byte layout; circuit mapping only decides which local output changes, not how switch status or current feedback is encoded.
 
 ### Web settings
 

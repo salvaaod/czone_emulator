@@ -58,8 +58,6 @@ MODBUS_SWITCH_IDS = (1, 2, 3, 4)
 MODBUS_ACTION_TIMEOUT_SECONDS = 5.0
 MODBUS_INTER_FRAME_GAP_SECONDS = 0.005
 CIRCUIT_LOAD_MAPS = {
-    0x05: 1,
-    0x06: 2,
     0x07: 1,
     0x08: 2,
     0x09: 3,
@@ -488,17 +486,21 @@ class CZone:
             staged = self.pending_commands.get(circuit_code)
             desired = staged == 0xF1
             updated_states = []
-            if staged in (0xF1, 0xF2):
+            should_emit_switch_event = staged in (0xF1, 0xF2)
+            if should_emit_switch_event:
                 for output_index in load_indexes:
                     is_on = self._set_output(output_index, desired)
                     updated_states.append((output_index, is_on))
                 self.pending_commands.pop(circuit_code, None)
             else:
+                # Match the original Arduino sketch behavior: 0x40/0x42 is the
+                # end/ack phase, not a switch-change request by itself. Report the
+                # current mapped output state but do not drive Modbus/event outputs.
                 for output_index in load_indexes:
                     is_on = bool(self.state & self._state_mask_for_output(output_index))
                     updated_states.append((output_index, is_on))
 
-            if self.on_switch_event:
+            if should_emit_switch_event and self.on_switch_event:
                 for output_index, is_on in updated_states:
                     self.on_switch_event(0x04 + output_index, is_on)
 
