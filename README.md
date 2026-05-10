@@ -99,10 +99,10 @@ Incoming PGN 65280 commands are matched by CZone circuit code, not by keyboard C
 
 ```python
 CIRCUIT_LOAD_MAPS = {
-    0x05: (1,),
-    0x06: (2, 3),
-    0x07: (3,),
-    0x08: (4,),
+    0x05: 1,
+    0x06: 2,
+    0x07: 3,
+    0x08: 4,
 }
 ```
 
