@@ -106,7 +106,14 @@ CIRCUIT_LOAD_MAPS = {
 }
 ```
 
-A future configuration file can replace this table without changing the command-processing logic.
+A future configuration file can replace this table without changing the command-processing logic. Circuit codes do not need to match the switch/output number. For example, this is valid and still sends switch/output feedback as outputs 1 and 2:
+
+```python
+CIRCUIT_LOAD_MAPS = {
+    0x10: 1,
+    0x11: 2,
+}
+```
 
 ### Network feedback mapping
 

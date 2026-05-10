@@ -64,6 +64,21 @@ class FeedbackMappingTest(unittest.TestCase):
                     [idx == switch_number for idx in range(1, 5)],
                 )
 
+    def test_arbitrary_circuit_codes_map_to_configured_switches(self):
+        self.czone = CZone(self.transport, circuit_load_maps={0x10: 1, 0x11: 2})
+
+        for circuit_code, switch_number in ((0x10, 1), (0x11, 2)):
+            with self.subTest(circuit_code=circuit_code, switch_number=switch_number):
+                self.czone.state = 0
+                self.transport.sent.clear()
+                self.send_circuit_command(circuit_code, 0xF1)
+                self.send_circuit_command(circuit_code, 0x40)
+                self.assertEqual(self.latest_heartbeat_state(), 1 << (switch_number - 1))
+                self.assertEqual(
+                    self.czone.get_switch_states(),
+                    [idx == switch_number for idx in range(1, 5)],
+                )
+
     def test_current_feedback_uses_same_numbered_pgn_output_records(self):
         for output_index, amps in ((1, 1.1), (2, 2.2), (3, 3.3), (4, 4.4)):
             self.czone.set_output_current(output_index, amps)
