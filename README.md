@@ -133,7 +133,7 @@ Returns the lightweight monitoring/control web page.
 
 ### `GET /api/state`
 
-Returns switch states, DIP switch value, adjustable output currents, and circuit-to-load mappings.
+Returns switch states, DIP switch value, configured adjustable output currents, effective reported output currents, and circuit-to-load mappings.
 
 ### `POST /api/toggle`
 
@@ -149,7 +149,7 @@ Valid `switch_id` values are `1` through `4`.
 
 ### `POST /api/output_current`
 
-Sets an adjustable output current. Values are quantized to 0.1 A and clamped to the supported single-byte range.
+Sets an adjustable output current. Values are quantized to 0.1 A and clamped to the supported single-byte range. The configured value is retained while an output is OFF, but detailed current feedback reports `0.0 A` for OFF outputs and reports the configured value when the output is ON.
 
 Request body:
 
@@ -158,6 +158,16 @@ Request body:
 ```
 
 Valid `output_index` values are `1` through `4`.
+
+### `POST /api/output_currents`
+
+Sets multiple adjustable output currents in one request. The web UI uses this endpoint when applying all current fields at once, including after the **Set all fields** helper copies one value into every output field.
+
+Request body:
+
+```json
+{ "amps": { "1": 3.5, "2": 3.5, "3": 3.5, "4": 3.5 } }
+```
 
 ### `POST /api/config/upload`
 
