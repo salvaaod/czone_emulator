@@ -60,6 +60,7 @@ MODBUS_STATUS_REGISTER = 0x8000
 MODBUS_SWITCH_IDS = (1, 2, 3, 4)
 MODBUS_ACTION_TIMEOUT_SECONDS = 5.0
 MODBUS_INTER_FRAME_GAP_SECONDS = 0.1
+MODBUS_INTER_DEVICE_COMMAND_DELAY_SECONDS = float(os.getenv("MODBUS_INTER_DEVICE_COMMAND_DELAY_SECONDS", "0.2"))
 CIRCUIT_LOAD_MAPS = {
     0x07: 1,
     0x08: 2,
@@ -1517,10 +1518,19 @@ setInterval(refresh,1000);refresh();
 
 
 class CZoneHeadless:
-    def __init__(self, czone: CZone, logger: AppLogger, modbus_port: str, modbus_baudrate: int):
+    def __init__(
+        self,
+        czone: CZone,
+        logger: AppLogger,
+        modbus_port: str,
+        modbus_baudrate: int,
+        inter_device_command_delay_seconds: float = MODBUS_INTER_DEVICE_COMMAND_DELAY_SECONDS,
+    ):
         self.czone = czone
         self.logger = logger
         self.modbus_bridge = ModbusBreakerBridge(port=modbus_port, baudrate=modbus_baudrate)
+        self.inter_device_command_delay_seconds = max(0.0, float(inter_device_command_delay_seconds))
+        self._last_modbus_command_at = 0.0
         self.modbus_enabled = True
         self.modbus_requests: Queue = Queue()
         self.modbus_events: Queue = Queue()
@@ -1529,6 +1539,9 @@ class CZoneHeadless:
         self._modbus_thread = threading.Thread(target=self._modbus_worker, daemon=True)
         self._modbus_thread.start()
         self.czone.on_switch_event = self.record_switch_event
+        self.logger.log(
+            f"Modbus inter-device command delay: {self.inter_device_command_delay_seconds:.3f}s"
+        )
         self.last_heartbeat = time.time()
         self.last_status = time.time()
         self.last_n2k_identity = time.time() - 60
@@ -1541,14 +1554,13 @@ class CZoneHeadless:
                 req = None
 
             if req:
-                action, switch_id, is_on = req
-                if action == "write":
+                self._process_modbus_request(req)
+                while True:
                     try:
-                        ok = self.modbus_bridge.write_command(switch_id, 2 if is_on else 1)
-                    except Exception as exc:
-                        ok = False
-                        self.modbus_events.put(("error", f"Modbus write error breaker {switch_id}: {exc}"))
-                    self.modbus_events.put(("write_ack", switch_id, is_on, ok))
+                        next_req = self.modbus_requests.get_nowait()
+                    except Empty:
+                        break
+                    self._process_modbus_request(next_req)
 
             for switch_id in MODBUS_SWITCH_IDS:
                 try:
@@ -1559,6 +1571,22 @@ class CZoneHeadless:
                     return
                 self.modbus_events.put(("status", switch_id, value))
             time.sleep(MODBUS_POLL_INTERVAL_SECONDS)
+
+    def _process_modbus_request(self, req):
+        action, switch_id, is_on = req
+        if action != "write":
+            return
+
+        elapsed_since_command = time.monotonic() - self._last_modbus_command_at
+        if elapsed_since_command < self.inter_device_command_delay_seconds:
+            time.sleep(self.inter_device_command_delay_seconds - elapsed_since_command)
+        try:
+            ok = self.modbus_bridge.write_command(switch_id, 2 if is_on else 1)
+        except Exception as exc:
+            ok = False
+            self.modbus_events.put(("error", f"Modbus write error breaker {switch_id}: {exc}"))
+        self._last_modbus_command_at = time.monotonic()
+        self.modbus_events.put(("write_ack", switch_id, is_on, ok))
 
     def _process_modbus_events(self):
         while True:
@@ -1573,6 +1601,9 @@ class CZoneHeadless:
                 continue
             if kind == "write_ack":
                 _, switch_id, is_on, ok = event
+                pending = self.pending_modbus_actions.get(switch_id)
+                if pending:
+                    pending["deadline"] = time.time() + MODBUS_ACTION_TIMEOUT_SECONDS
                 if not ok:
                     self.logger.log(f"Modbus write failed for breaker {switch_id}")
                 continue
@@ -1599,7 +1630,11 @@ class CZoneHeadless:
 
     def _check_modbus_timeouts(self):
         now = time.time()
-        expired = [sid for sid, info in self.pending_modbus_actions.items() if now > float(info["deadline"])]
+        expired = [
+            sid
+            for sid, info in self.pending_modbus_actions.items()
+            if info.get("deadline") is not None and now > float(info["deadline"])
+        ]
         for switch_id in expired:
             info = self.pending_modbus_actions.pop(switch_id)
             desired = bool(info["desired"])
@@ -1620,7 +1655,7 @@ class CZoneHeadless:
     def _send_modbus_command(self, switch_id: int, is_on: bool):
         if not self.modbus_enabled:
             return
-        self.pending_modbus_actions[switch_id] = {"desired": is_on, "deadline": time.time() + MODBUS_ACTION_TIMEOUT_SECONDS, "last_polled": None}
+        self.pending_modbus_actions[switch_id] = {"desired": is_on, "deadline": None, "last_polled": None}
         self.modbus_requests.put(("write", switch_id, is_on))
 
     def record_switch_event(self, switch_code: int, is_on: bool):
@@ -1665,6 +1700,12 @@ def main():
     configured_port = os.getenv("SERIAL_PORT", MODBUS_DEFAULT_COM_PORT)
     resolved_port = resolve_serial_port(configured_port)
     modbus_baudrate = int(os.getenv("SERIAL_BAUDRATE", str(MODBUS_BAUDRATE)))
+    modbus_inter_device_delay_seconds = float(
+        os.getenv(
+            "MODBUS_INTER_DEVICE_COMMAND_DELAY_SECONDS",
+            str(MODBUS_INTER_DEVICE_COMMAND_DELAY_SECONDS),
+        )
+    )
 
     try:
         transport.open()
@@ -1711,7 +1752,13 @@ def main():
             czone.detailed_status()
             time.sleep(0.1)
 
-        app = CZoneHeadless(czone, logger=logger, modbus_port=resolved_port, modbus_baudrate=modbus_baudrate)
+        app = CZoneHeadless(
+            czone,
+            logger=logger,
+            modbus_port=resolved_port,
+            modbus_baudrate=modbus_baudrate,
+            inter_device_command_delay_seconds=modbus_inter_device_delay_seconds,
+        )
         try:
             app.run()
         finally:
