@@ -1410,8 +1410,6 @@ if(uiInit) return;
 const b=document.getElementById('buttons');
 s.switch_states.forEach((_,i)=>{const id=i+1;const btn=document.createElement('button');btn.id=`sw_${id}`;btn.onclick=()=>fetch('/api/toggle',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({switch_id:id})}).then(refresh);b.appendChild(btn);});
 const c=document.getElementById('currents');
-const allField=document.createElement('span');allField.className='current-field';allField.innerHTML=`<label for='out_all'>All</label><input step='0.1' min='0' max='25.5' type='number' id='out_all' value='0.0'>`;c.appendChild(allField);
-const setAll=document.createElement('button');setAll.id='set_all_currents';setAll.textContent='Set all fields';setAll.onclick=()=>{const v=document.getElementById('out_all').value||'0';Object.keys(s.output_currents).forEach((k)=>{document.getElementById(`out_${k}`).value=v;});};c.appendChild(setAll);
 Object.entries(s.output_currents).forEach(([k,val])=>{const field=document.createElement('span');field.className='current-field';field.innerHTML=`<label for='out_${k}'>O${k}</label><input step='0.1' min='0' max='25.5' type='number' id='out_${k}' value='${Number(val).toFixed(1)}'>`;c.appendChild(field);});
 const applyCurrents=document.createElement('button');applyCurrents.id='apply_currents';applyCurrents.textContent='Apply currents';applyCurrents.onclick=()=>{const amps={};Object.keys(s.output_currents).forEach((k)=>{amps[k]=parseFloat(document.getElementById(`out_${k}`).value||'0');});fetch('/api/output_currents',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({amps:amps})}).then(refresh);};c.appendChild(applyCurrents);
 const form=document.getElementById('config_form');

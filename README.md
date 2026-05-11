@@ -161,7 +161,7 @@ Valid `output_index` values are `1` through `4`.
 
 ### `POST /api/output_currents`
 
-Sets multiple adjustable output currents in one request. The web UI uses this endpoint when applying all current fields at once, including after the **Set all fields** helper copies one value into every output field.
+Sets multiple adjustable output currents in one request. The web UI uses this endpoint when **Apply currents** submits the values currently entered in the output current fields.
 
 Request body:
 
