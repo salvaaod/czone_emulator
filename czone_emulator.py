@@ -1050,12 +1050,15 @@ class CZone:
         else:
             print(message)
 
+    def is_output_on(self, output_index: int) -> bool:
+        if not (1 <= output_index <= OUTPUT_COUNT):
+            raise ValueError(f"Output index must be 1..{OUTPUT_COUNT}")
+        if output_index > ADJUSTABLE_OUTPUT_COUNT:
+            return False
+        return bool(self.state & self._state_mask_for_output(output_index))
+
     def get_switch_states(self):
-        states = []
-        for switch_id in range(1, 5):
-            mask = 1 << (switch_id - 1)
-            states.append(bool(self.state & mask))
-        return states
+        return [self.is_output_on(switch_id) for switch_id in range(1, 5)]
 
     def heartbeat(self):
         if self.authenticated:
@@ -1090,7 +1093,7 @@ class CZone:
         current_byte_positions = {1: 0, 2: 3, 3: 6, 4: 9, 5: 12, 6: 15}
         for output_index, position in current_byte_positions.items():
             current_byte = self.get_output_current_tenths(output_index)
-            if output_index > ADJUSTABLE_OUTPUT_COUNT:
+            if output_index > ADJUSTABLE_OUTPUT_COUNT or not self.is_output_on(output_index):
                 current_byte = 0
             output_bytes[position] = current_byte
 
@@ -1099,7 +1102,10 @@ class CZone:
         if LOG_TX_130817_DETAILED_CURRENTS:
             self._log(
                 "TX 130817 detailed currents: "
-                + " ".join(f"O{i}={self.get_output_current(i):.1f}A" for i in range(1, ADJUSTABLE_OUTPUT_COUNT + 1))
+                + " ".join(
+                    f"O{i}={(self.get_output_current(i) if self.is_output_on(i) else 0.0):.1f}A"
+                    for i in range(1, ADJUSTABLE_OUTPUT_COUNT + 1)
+                )
             )
 
     def address_claim(self):
@@ -1390,22 +1396,23 @@ class CZoneWebServer:
         def index():
             return """<!doctype html>
 <html><head><meta charset='utf-8'><title>CZone Emulator</title>
-<style>body{font-family:Arial,sans-serif;margin:12px}h2,h3{margin:0 0 8px}.card{border:1px solid #ccc;border-radius:8px;padding:8px;margin-bottom:8px}button{padding:6px 8px;margin:2px 4px}.on{background:#2e7d32;color:#fff}.off{background:#c62828;color:#fff}.muted{color:#555}.mapping-line{white-space:nowrap;overflow-x:auto}.current-row{display:flex;align-items:center;gap:8px;flex-wrap:wrap}.current-field{display:inline-flex;align-items:center;gap:4px}label{display:inline-block}input[type=number]{width:52px}pre{background:#111;color:#d7ffd7;padding:8px;white-space:pre-wrap;line-height:1.25em}</style></head>
+<style>body{font-family:Arial,sans-serif;margin:12px}h2,h3{margin:0 0 8px}.card{border:1px solid #ccc;border-radius:8px;padding:8px;margin-bottom:8px}button{padding:6px 8px;margin:2px 4px}.on{background:#2e7d32;color:#fff}.off{background:#c62828;color:#fff}.muted{color:#555}.mapping-line{white-space:nowrap;overflow-x:auto}.current-row{display:flex;align-items:center;gap:8px;flex-wrap:wrap}.current-field{display:inline-flex;align-items:center;gap:4px}.current-note{flex-basis:100%;font-size:.9em;color:#555}label{display:inline-block}input[type=number]{width:52px}pre{background:#111;color:#d7ffd7;padding:8px;white-space:pre-wrap;line-height:1.25em}</style></head>
 <body><h2>CZone ACOI Emulator (Headless Web)</h2>
 <div class='card'><div id='states'></div><div id='mapping'></div></div>
 <div class='card'><h3>Switches</h3><div id='buttons'></div></div>
-<div class='card'><h3>Output currents (A)</h3><div id='currents' class='current-row'></div></div>
+<div class='card'><h3>Output currents (A)</h3><div id='currents' class='current-row'></div><div id='effective_currents' class='current-note'>Set current is stored per output. OFF outputs report 0.0 A; ON outputs report the set value.</div></div>
 <div class='card'><h3>Configuration file</h3><form id='config_form'><input id='config_file' name='config_file' type='file' accept='.zcf'><button type='submit'>Load .zcf</button></form><div id='config_status'></div></div>
 <div class='card'><h3>Logs</h3><pre id='logs'></pre></div>
 <script>
 let uiInit=false;
+let currentsDirty=false;
 function ensureUi(s){
 if(uiInit) return;
 const b=document.getElementById('buttons');
 s.switch_states.forEach((_,i)=>{const id=i+1;const btn=document.createElement('button');btn.id=`sw_${id}`;btn.onclick=()=>fetch('/api/toggle',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({switch_id:id})}).then(refresh);b.appendChild(btn);});
 const c=document.getElementById('currents');
-Object.entries(s.output_currents).forEach(([k,val])=>{const field=document.createElement('span');field.className='current-field';field.innerHTML=`<label for='out_${k}'>O${k}</label><input step='0.1' min='0' max='25.5' type='number' id='out_${k}' value='${Number(val).toFixed(1)}'>`;c.appendChild(field);});
-const applyCurrents=document.createElement('button');applyCurrents.id='apply_currents';applyCurrents.textContent='Apply currents';applyCurrents.onclick=()=>{const amps={};Object.keys(s.output_currents).forEach((k)=>{amps[k]=parseFloat(document.getElementById(`out_${k}`).value||'0');});fetch('/api/output_currents',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({amps:amps})}).then(refresh);};c.appendChild(applyCurrents);
+Object.entries(s.output_currents).forEach(([k,val])=>{const field=document.createElement('span');field.className='current-field';field.innerHTML=`<label for='out_${k}'>O${k}</label><input step='0.1' min='0' max='25.5' type='number' id='out_${k}' value='${Number(val).toFixed(1)}'>`;const input=field.querySelector('input');input.oninput=()=>{currentsDirty=true;};c.appendChild(field);});
+const applyCurrents=document.createElement('button');applyCurrents.id='apply_currents';applyCurrents.textContent='Apply currents';applyCurrents.onclick=async ()=>{const amps={};Object.keys(s.output_currents).forEach((k)=>{amps[k]=parseFloat(document.getElementById(`out_${k}`).value||'0');});const response=await fetch('/api/output_currents',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({amps:amps})});if(response.ok){currentsDirty=false;}refresh();};c.appendChild(applyCurrents);
 const form=document.getElementById('config_form');
 form.onsubmit=async (event)=>{event.preventDefault();const status=document.getElementById('config_status');const input=document.getElementById('config_file');if(!input.files.length){status.textContent='Choose a .zcf file first.';return;}const data=new FormData();data.append('config_file',input.files[0]);const response=await fetch('/api/config/upload',{method:'POST',body:data});const result=await response.json();status.textContent=response.ok?`Saved ${result.filename} (${result.config_file?.internal_name||'unknown name'}, ${result.config_file?.size_label||'unknown size'}). Configuration applied without restarting.`:(result.error||'Upload failed');if(response.ok){input.value='';refresh();}};
 uiInit=true;
@@ -1417,7 +1424,9 @@ const mappingStatus=document.createElement('div');mappingStatus.className='mappi
 const mappingFile=document.createElement('div');mappingFile.className='mapping-line';mappingFile.textContent=fileText;mapping.appendChild(mappingFile);
 const mappingLoads=document.createElement('div');mappingLoads.className='mapping-line';mappingLoads.textContent=`Circuit load mappings: ${mapLines.join(' | ')}`;mapping.appendChild(mappingLoads);
 s.switch_states.forEach((v,i)=>{const id=i+1;const btn=document.getElementById(`sw_${id}`);btn.className=v?'on':'off';btn.textContent=`Toggle S${id} (${v?'ON':'OFF'})`;});
-Object.entries(s.output_currents).forEach(([k,val])=>{const input=document.getElementById(`out_${k}`);if(document.activeElement!==input){input.value=Number(val).toFixed(1);}});
+if(!currentsDirty){Object.entries(s.output_currents).forEach(([k,val])=>{const input=document.getElementById(`out_${k}`);if(document.activeElement!==input){input.value=Number(val).toFixed(1);}});}
+const effective=Object.entries(s.effective_output_currents||{}).map(([k,val])=>`O${k}: ${Number(val).toFixed(1)} A`).join(' | ');
+document.getElementById('effective_currents').textContent=`Set current is stored per output. Reporting now: ${effective}`;
 document.getElementById('logs').textContent=(l.logs||[]).slice(-50).join('\\n');}
 setInterval(refresh,1000);refresh();
 </script></body></html>
@@ -1430,6 +1439,14 @@ setInterval(refresh,1000);refresh();
                 'czone_dip_switch': self.czone.czone_dip_switch,
                 'output_currents': {
                     str(output_index): self.czone.get_output_current(output_index)
+                    for output_index in range(1, ADJUSTABLE_OUTPUT_COUNT + 1)
+                },
+                'effective_output_currents': {
+                    str(output_index): (
+                        self.czone.get_output_current(output_index)
+                        if self.czone.is_output_on(output_index)
+                        else 0.0
+                    )
                     for output_index in range(1, ADJUSTABLE_OUTPUT_COUNT + 1)
                 },
                 'mappings': {
