@@ -1405,13 +1405,14 @@ class CZoneWebServer:
 <div class='card'><h3>Logs</h3><pre id='logs'></pre></div>
 <script>
 let uiInit=false;
+let currentsDirty=false;
 function ensureUi(s){
 if(uiInit) return;
 const b=document.getElementById('buttons');
 s.switch_states.forEach((_,i)=>{const id=i+1;const btn=document.createElement('button');btn.id=`sw_${id}`;btn.onclick=()=>fetch('/api/toggle',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({switch_id:id})}).then(refresh);b.appendChild(btn);});
 const c=document.getElementById('currents');
-Object.entries(s.output_currents).forEach(([k,val])=>{const field=document.createElement('span');field.className='current-field';field.innerHTML=`<label for='out_${k}'>O${k}</label><input step='0.1' min='0' max='25.5' type='number' id='out_${k}' value='${Number(val).toFixed(1)}'>`;c.appendChild(field);});
-const applyCurrents=document.createElement('button');applyCurrents.id='apply_currents';applyCurrents.textContent='Apply currents';applyCurrents.onclick=()=>{const amps={};Object.keys(s.output_currents).forEach((k)=>{amps[k]=parseFloat(document.getElementById(`out_${k}`).value||'0');});fetch('/api/output_currents',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({amps:amps})}).then(refresh);};c.appendChild(applyCurrents);
+Object.entries(s.output_currents).forEach(([k,val])=>{const field=document.createElement('span');field.className='current-field';field.innerHTML=`<label for='out_${k}'>O${k}</label><input step='0.1' min='0' max='25.5' type='number' id='out_${k}' value='${Number(val).toFixed(1)}'>`;const input=field.querySelector('input');input.oninput=()=>{currentsDirty=true;};c.appendChild(field);});
+const applyCurrents=document.createElement('button');applyCurrents.id='apply_currents';applyCurrents.textContent='Apply currents';applyCurrents.onclick=async ()=>{const amps={};Object.keys(s.output_currents).forEach((k)=>{amps[k]=parseFloat(document.getElementById(`out_${k}`).value||'0');});const response=await fetch('/api/output_currents',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({amps:amps})});if(response.ok){currentsDirty=false;}refresh();};c.appendChild(applyCurrents);
 const form=document.getElementById('config_form');
 form.onsubmit=async (event)=>{event.preventDefault();const status=document.getElementById('config_status');const input=document.getElementById('config_file');if(!input.files.length){status.textContent='Choose a .zcf file first.';return;}const data=new FormData();data.append('config_file',input.files[0]);const response=await fetch('/api/config/upload',{method:'POST',body:data});const result=await response.json();status.textContent=response.ok?`Saved ${result.filename} (${result.config_file?.internal_name||'unknown name'}, ${result.config_file?.size_label||'unknown size'}). Configuration applied without restarting.`:(result.error||'Upload failed');if(response.ok){input.value='';refresh();}};
 uiInit=true;
@@ -1423,7 +1424,7 @@ const mappingStatus=document.createElement('div');mappingStatus.className='mappi
 const mappingFile=document.createElement('div');mappingFile.className='mapping-line';mappingFile.textContent=fileText;mapping.appendChild(mappingFile);
 const mappingLoads=document.createElement('div');mappingLoads.className='mapping-line';mappingLoads.textContent=`Circuit load mappings: ${mapLines.join(' | ')}`;mapping.appendChild(mappingLoads);
 s.switch_states.forEach((v,i)=>{const id=i+1;const btn=document.getElementById(`sw_${id}`);btn.className=v?'on':'off';btn.textContent=`Toggle S${id} (${v?'ON':'OFF'})`;});
-Object.entries(s.output_currents).forEach(([k,val])=>{const input=document.getElementById(`out_${k}`);if(document.activeElement!==input){input.value=Number(val).toFixed(1);}});
+if(!currentsDirty){Object.entries(s.output_currents).forEach(([k,val])=>{const input=document.getElementById(`out_${k}`);if(document.activeElement!==input){input.value=Number(val).toFixed(1);}});}
 const effective=Object.entries(s.effective_output_currents||{}).map(([k,val])=>`O${k}: ${Number(val).toFixed(1)} A`).join(' | ');
 document.getElementById('effective_currents').textContent=`Set current is stored per output. Reporting now: ${effective}`;
 document.getElementById('logs').textContent=(l.logs||[]).slice(-50).join('\\n');}
