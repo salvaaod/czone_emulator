@@ -92,7 +92,7 @@ http://<host>:8080/
 - `SERIAL_BAUDRATE`: Serial baudrate. Default: `115200`.
 - `SERIAL_LINUX_DEFAULT_PORT`: Compatibility fallback used when `SERIAL_PORT=COM8`. Default: `/dev/ttyAS3`.
 - `SERIAL_COM_ALIAS_MAP`: Optional comma-separated compatibility alias map, for example `COM8=/dev/ttyAS3,COM9=/dev/ttyUSB0`.
-- `MODBUS_INTER_DEVICE_COMMAND_DELAY_SECONDS`: Delay between Modbus write commands when one CZone action maps to multiple RS485 breaker devices. Default: `0.2` (200 ms). Set to `0` to disable the additional command spacing.
+- `MODBUS_INTER_DEVICE_COMMAND_DELAY_SECONDS`: Delay between Modbus write commands when one CZone action maps to multiple RS485 breaker devices. Default: `0.5` (500 ms). Set to `0` to disable the additional command spacing.
 
 ### Circuit/load mappings
 
