@@ -120,6 +120,8 @@ CIRCUIT_LOAD_MAPS = {
 
 Feedback sent by the emulator is keyed to the same local output/load number selected by `CIRCUIT_LOAD_MAPS`; the circuit code itself is not written into the feedback payload. Output ON/OFF feedback keeps the original switch status encoding: switch codes `0x05` through `0x08` represent outputs 1 through 4. Detailed PGN 130817 current feedback also keeps the original byte layout; circuit mapping only decides which local output changes, not how switch status or current feedback is encoded.
 
+Incoming PGN 65280 switch commands still support the existing staged CZone sequence (`0xF1`/`0xF2` followed by `0x40`/`0x42`). Reception/display panels that send direct commands are also supported: command `0x61` switches the mapped output ON and command `0x62` switches it OFF.
+
 ### Web settings
 
 - `WEB_HOST`: Flask bind host. Default: `0.0.0.0`.

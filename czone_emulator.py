@@ -1220,6 +1220,31 @@ class CZone:
             self._log(f"Circuit 0x{circuit_code:02X} -> {states_text}")
             self.heartbeat()
             self.detailed_status()
+        elif cmd in (0x61, 0x62):
+            # Some reception/display panels send direct ON/OFF commands instead
+            # of the staged 0xF1/0xF2 followed by 0x40/0x42 sequence. Keep the
+            # existing staged commands above, and also accept these direct forms.
+            desired = cmd == 0x61
+            updated_states = []
+            for output_index in load_indexes:
+                is_on = self._set_output(output_index, desired)
+                updated_states.append((output_index, is_on))
+
+            self.pending_commands.pop(circuit_code, None)
+
+            if self.on_switch_event:
+                for output_index, is_on in updated_states:
+                    self.on_switch_event(0x04 + output_index, is_on)
+
+            states_text = ", ".join(
+                f"Output {output_index}={'ON' if is_on else 'OFF'}"
+                for output_index, is_on in updated_states
+            )
+            self._log(
+                f"Circuit 0x{circuit_code:02X} direct command 0x{cmd:02X} -> {states_text}"
+            )
+            self.heartbeat()
+            self.detailed_status()
         else:
             self._log(f"RX 65280 ignored: unsupported command 0x{cmd:02X}")
 
